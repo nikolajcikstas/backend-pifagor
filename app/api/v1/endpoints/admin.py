@@ -34,6 +34,10 @@ class BaseParentChildLink(BaseModel):
     child_id: int
 
 
+class AdminStudentUpdate(BaseModel):
+    lesson_price: Optional[float] = None
+
+
 def generate_random_code(prefix: str) -> str:
     return f"PIF-{prefix.upper()}-{secrets.token_hex(3).upper()}"
 
@@ -170,8 +174,6 @@ async def finance_report(
     )
     children = {cp.id: cp for cp in cp_res.scalars().unique()}
 
-    from app.services.email_parser import LESSON_PRICE
-
     rows: List[StudentFinanceRow] = []
     for child_id in sorted(all_child_ids):
         cp = children.get(child_id)
@@ -180,7 +182,8 @@ async def finance_report(
         u = cp.user
         conducted = lessons_by_child.get(child_id, 0)
         amount_paid = amounts_by_child.get(child_id, 0.0) or 0.0
-        lessons_paid = int(amount_paid // LESSON_PRICE) if LESSON_PRICE else 0
+        lesson_price = cp.lesson_price or 40
+        lessons_paid = int(amount_paid // lesson_price) if lesson_price else 0
 
         rows.append(StudentFinanceRow(
             child_id=child_id,
@@ -188,9 +191,34 @@ async def finance_report(
             lessons_conducted=conducted,
             lessons_paid=lessons_paid,
             amount_paid=round(amount_paid, 2),
+            lesson_price=round(lesson_price, 2),
         ))
 
     return rows
+
+
+@router.patch("/students/{user_id}", dependencies=[Depends(require_admin)])
+async def update_admin_student(
+    user_id: int,
+    payload: AdminStudentUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(User)
+        .options(joinedload(User.child_profile))
+        .where(User.id == user_id, User.role == RoleEnum.child)
+    )
+    student = result.scalars().unique().one_or_none()
+    if not student or not student.child_profile:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    if payload.lesson_price is not None:
+        if payload.lesson_price <= 0:
+            raise HTTPException(status_code=400, detail="Lesson price must be greater than zero")
+        student.child_profile.lesson_price = payload.lesson_price
+
+    await db.commit()
+    return {"ok": True, "lesson_price": student.child_profile.lesson_price}
 
 
 # ─── Ручная привязка Родитель ↔ Ребёнок ────────────────────────────────────────

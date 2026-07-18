@@ -21,7 +21,7 @@ IMAP_HOST = os.getenv("EMAIL_IMAP_HOST", "imap.gmail.com")
 IMAP_PORT = int(os.getenv("EMAIL_IMAP_PORT", "993"))
 EMAIL_USER = os.getenv("EMAIL_USER", "")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
-LESSON_PRICE = float(os.getenv("LESSON_PRICE", "80"))
+LESSON_PRICE = float(os.getenv("LESSON_PRICE", "40"))
 IMAP_TIMEOUT = 15
 
 

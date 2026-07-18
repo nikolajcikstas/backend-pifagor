@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from app.api.v1.router import api_router
 from app.api.v1.endpoints import admin
 from app.db.session import engine, Base
@@ -29,6 +30,10 @@ async def lifespan(app: FastAPI):
         async with asyncio.timeout(30):
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS lesson_price DOUBLE PRECISION NOT NULL DEFAULT 40"
+                ))
         logger.info("Database schema initialization complete")
     except Exception:
         logger.exception("Database schema initialization failed")

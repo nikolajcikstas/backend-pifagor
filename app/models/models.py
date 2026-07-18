@@ -103,6 +103,7 @@ class ChildProfile(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
     grade: Mapped[Optional[int]] = mapped_column(Integer)
+    lesson_price: Mapped[float] = mapped_column(Float, default=40, server_default="40", nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="child_profile")
     parents: Mapped[List["ParentChild"]] = relationship(back_populates="child")

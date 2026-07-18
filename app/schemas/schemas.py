@@ -64,6 +64,7 @@ class UserUpdate(BaseModel):
 
 class ProfileBasicOut(BaseModel):
     id: int
+    lesson_price: Optional[float] = None
     model_config = {"from_attributes": True}
 
 
@@ -546,3 +547,4 @@ class StudentFinanceRow(BaseModel):
     lessons_conducted: int
     lessons_paid: int
     amount_paid: float
+    lesson_price: float
