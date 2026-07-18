@@ -24,8 +24,15 @@ async def _daily_email_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Starting database schema initialization")
+    try:
+        async with asyncio.timeout(30):
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database schema initialization complete")
+    except Exception:
+        logger.exception("Database schema initialization failed")
+        raise
     task = asyncio.create_task(_daily_email_task())
     yield
     task.cancel()
