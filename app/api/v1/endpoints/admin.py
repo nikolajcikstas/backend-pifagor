@@ -115,6 +115,13 @@ async def trigger_email_parsing(db: AsyncSession = Depends(get_db)):
 
 # ─── Finance Report ────────────────────────────────────────────────────────────
 
+@router.post("/receipts/rematch", dependencies=[Depends(require_admin)])
+async def rematch_receipts(db: AsyncSession = Depends(get_db)):
+    from app.services.email_parser import rematch_unlinked_receipts
+    count = await rematch_unlinked_receipts(db)
+    return {"matched_receipts": count}
+
+
 @router.get("/finance-report", response_model=List[StudentFinanceRow], dependencies=[Depends(require_admin)])
 async def finance_report(
         week_start: Optional[date] = Query(None),

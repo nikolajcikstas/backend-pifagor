@@ -154,7 +154,7 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
     2. Находим ParentProfile этого пользователя
     3. Через ParentChild получаем child_id
     """
-    from app.models.models import User, ParentProfile, ParentChild, RoleEnum
+    from app.models.models import User, ParentProfile, ParentChild, ChildProfile, RoleEnum
 
     parts = payer_name.strip().split()
     if len(parts) < 2:
@@ -190,6 +190,29 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
         parent = result.scalar_one_or_none()
 
     if parent is None:
+        # Fallback for admin-created students: the payer may be a parent who has no
+        # account/link yet. Match by child surname only when it points to exactly one child.
+        last_stem = last_name[:-1] if len(last_name) > 3 else last_name
+        result = await db.execute(
+            select(ChildProfile)
+            .join(ChildProfile.user)
+            .where(
+                User.role == RoleEnum.child,
+                User.last_name.ilike(f"{last_stem}%"),
+            )
+        )
+        children = result.scalars().all()
+        if len(children) == 1:
+            logger.info(
+                "Matched payer '%s' to child_id=%s by unique child surname",
+                payer_name, children[0].id,
+            )
+            return children[0].id
+        if len(children) > 1:
+            logger.warning(
+                "Payer '%s' matched %d children by surname, cannot auto-match receipt",
+                payer_name, len(children),
+            )
         return None
 
     # Берём ребёнка этого родителя
@@ -210,12 +233,35 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
     return None
 
 
+async def rematch_unlinked_receipts(db: AsyncSession) -> int:
+    from app.models.models import EmailReceipt
+
+    result = await db.execute(
+        select(EmailReceipt).where(EmailReceipt.child_id.is_(None))
+    )
+    receipts = result.scalars().all()
+    matched = 0
+
+    for receipt in receipts:
+        child_id = await _find_child_by_payer_name(receipt.payer_name, db)
+        if child_id is None:
+            continue
+        receipt.child_id = child_id
+        matched += 1
+
+    if matched:
+        await db.commit()
+
+    logger.info("Email parser: rematched %d existing receipts.", matched)
+    return matched
+
+
 async def run_email_parse(db: AsyncSession) -> int:
     from app.models.models import EmailReceipt
 
     raw_receipts = _fetch_raw_receipts()
     if not raw_receipts:
-        return 0
+        return await rematch_unlinked_receipts(db)
 
     saved = 0
     for r in raw_receipts:
@@ -237,7 +283,13 @@ async def run_email_parse(db: AsyncSession) -> int:
                 )
             )
 
-        if exists.scalar_one_or_none():
+        existing_receipt = exists.scalar_one_or_none()
+        if existing_receipt:
+            if existing_receipt.child_id is None:
+                child_id = await _find_child_by_payer_name(existing_receipt.payer_name, db)
+                if child_id is not None:
+                    existing_receipt.child_id = child_id
+                    saved += 1
             continue
 
         # Сопоставление: ФИО родителя → ребёнок
@@ -260,5 +312,6 @@ async def run_email_parse(db: AsyncSession) -> int:
     if saved:
         await db.commit()
 
-    logger.info("Email parser: saved %d new receipts.", saved)
-    return saved
+    rematched = await rematch_unlinked_receipts(db)
+    logger.info("Email parser: saved/rematched %d receipts.", saved + rematched)
+    return saved + rematched
