@@ -1,0 +1,1899 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Пифагор</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:14px;color:#1a1a1a;background:#f5f4f0}
+.app{min-height:100vh;display:flex;flex-direction:column}
+.topbar{background:#fff;border-bottom:1px solid #e5e3dc;padding:0 20px;display:flex;align-items:center;justify-content:space-between;height:52px;position:sticky;top:0;z-index:100}
+.logo{font-size:18px;font-weight:600;color:#3C3489;letter-spacing:-0.5px}
+.nav-tabs{display:flex;gap:4px}
+.nav-tab{padding:6px 14px;border-radius:8px;cursor:pointer;font-size:13px;color:#666;border:none;background:none;transition:all .15s}
+.nav-tab:hover{background:#f0eff9}
+.nav-tab.active{background:#EEEDFE;color:#3C3489;font-weight:500}
+.main{flex:1;padding:24px 20px;max-width:1100px;margin:0 auto;width:100%}
+.page{display:none}.page.active{display:block}
+.card{background:#fff;border:1px solid #e5e3dc;border-radius:12px;padding:20px;margin-bottom:16px}
+.card-sm{background:#fff;border:1px solid #e5e3dc;border-radius:8px;padding:14px}
+h2{font-size:18px;font-weight:600;margin-bottom:16px}
+h3{font-size:15px;font-weight:500;margin-bottom:12px}
+label{font-size:12px;color:#888;display:block;margin-bottom:4px;font-weight:500;text-transform:uppercase;letter-spacing:.4px}
+input,select,textarea{width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:14px;background:#fff;color:#1a1a1a;outline:none;height:36px;font-family:inherit}
+textarea{height:auto;min-height:80px;resize:vertical}
+input:focus,select:focus,textarea:focus{border-color:#7F77DD;box-shadow:0 0 0 3px #EEEDFE}
+.form-row{margin-bottom:12px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid #ddd;background:#fff;color:#333;transition:all .15s}
+.btn:hover{background:#f5f4f0}
+.btn.primary{background:#534AB7;color:#fff;border-color:#534AB7}
+.btn.primary:hover{background:#3C3489}
+.btn.success{background:#0F6E56;color:#fff;border-color:#0F6E56}
+.btn.danger{background:#A32D2D;color:#fff;border-color:#A32D2D}
+.btn.sm{padding:4px 10px;font-size:12px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:500}
+.badge-purple{background:#EEEDFE;color:#3C3489}
+.badge-green{background:#EAF3DE;color:#3B6D11}
+.badge-amber{background:#FAEEDA;color:#854F0B}
+.badge-red{background:#FCEBEB;color:#A32D2D}
+.badge-blue{background:#E6F1FB;color:#185FA5}
+.badge-gray{background:#F1EFE8;color:#5F5E5A}
+.alert{padding:10px 14px;border-radius:8px;font-size:13px;margin-bottom:12px}
+.alert-success{background:#EAF3DE;color:#3B6D11;border:1px solid #C0DD97}
+.alert-error{background:#FCEBEB;color:#A32D2D;border:1px solid #F7C1C1}
+.alert-info{background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 12px;border-bottom:1px solid #eee;color:#888;font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+td{padding:10px 12px;border-bottom:1px solid #f0efeb}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafaf8}
+.stat-card{background:#f8f7f3;border-radius:10px;padding:16px;text-align:center;border:1px solid #e5e3dc}
+.stat-num{font-size:26px;font-weight:600;color:#1a1a1a}
+.stat-label{font-size:11px;color:#888;margin-top:4px}
+.tab-group{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #e5e3dc;padding-bottom:8px}
+.tab-btn{padding:6px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:#888;border-radius:8px;transition:all .15s}
+.tab-btn.active{background:#EEEDFE;color:#3C3489;font-weight:500}
+
+/* Calendar */
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:12px}
+.cal-header{text-align:center;font-size:11px;color:#888;padding:6px 0;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.cal-day{min-height:72px;border:1px solid #e5e3dc;border-radius:8px;padding:6px;background:#fff;position:relative}
+.cal-day.empty{background:transparent;border-color:transparent}
+.cal-day.today{border-color:#7F77DD;background:#faf9ff}
+.cal-day.has-lesson{border-color:#AFA9EC}
+.cal-day-num{font-size:12px;color:#888;margin-bottom:3px;font-weight:500}
+.cal-lesson{border-radius:4px;margin-bottom:2px;cursor:pointer;font-size:11px;padding:3px 6px;line-height:1.3;transition:opacity .15s}
+.cal-lesson:hover{opacity:.8}
+.cal-lesson.paid{background:#EEEDFE;color:#3C3489}
+.cal-lesson.unpaid{background:#FAEEDA;color:#854F0B}
+.cal-lesson.cancelled{background:#F1EFE8;color:#888;text-decoration:line-through}
+.cal-lesson.done{background:#EAF3DE;color:#3B6D11}
+.cal-lesson.upcoming{background:#E6F1FB;color:#185FA5}
+
+/* Modal */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:1000}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:16px;padding:24px;width:460px;max-width:95vw;border:1px solid #e5e3dc;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+.modal-title{font-size:16px;font-weight:600;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between}
+.toast{position:fixed;bottom:24px;right:24px;background:#3C3489;color:#fff;padding:12px 18px;border-radius:10px;font-size:13px;z-index:9999;display:none;max-width:340px;box-shadow:0 8px 24px rgba(60,52,137,.3)}
+
+/* Spinners / Loading */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid #ddd;border-top-color:#534AB7;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading{text-align:center;padding:40px;color:#888;font-size:13px}
+
+/* Code box */
+.code-box{background:#f5f4f0;border:1px solid #ddd;border-radius:8px;padding:12px 16px;font-family:monospace;font-size:14px;letter-spacing:.5px;color:#3C3489;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-top:12px}
+let cachedUsers = [];
+/* Tutor info section */
+.payment-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f0efeb}
+.payment-row:last-child{border-bottom:none}
+
+/* Status badge for lessons */
+.lesson-card{background:#fff;border:1px solid #e5e3dc;border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
+.lesson-card:hover{border-color:#AFA9EC;background:#faf9ff}
+</style>
+</head>
+<body>
+<div class="app">
+<div class="topbar">
+  <div class="logo">△ Пифагор</div>
+  <div class="nav-tabs" id="nav-tabs">
+    <button class="nav-tab active" onclick="showPage('auth')">Войти</button>
+    <button class="nav-tab" onclick="showPage('admin')" id="tab-admin" style="display:none">Администратор</button>
+    <button class="nav-tab" onclick="showPage('tutor')" id="tab-tutor" style="display:none">Репетитор</button>
+    <button class="nav-tab" onclick="showPage('parent')" id="tab-parent" style="display:none">Родитель</button>
+    <button class="nav-tab" onclick="showPage('child')" id="tab-child" style="display:none">Ученик</button>
+    <button class="nav-tab" id="btn-logout" style="display:none;color:#A32D2D" onclick="logout()">Выйти</button>
+  </div>
+</div>
+
+<div class="main">
+
+<!-- ====== AUTH PAGE ====== -->
+<div class="page active" id="page-auth">
+  <div style="max-width:420px;margin:0 auto;padding-top:40px">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:32px;font-weight:700;color:#3C3489">△ Пифагор</div>
+      <div style="font-size:13px;color:#888;margin-top:4px">Платформа для репетиторов и учеников</div>
+    </div>
+    <div class="card">
+      <div class="tab-group" style="margin-bottom:16px">
+        <button class="tab-btn active" id="tab-login" onclick="switchAuth('login')">Войти</button>
+        <button class="tab-btn" id="tab-register" onclick="switchAuth('register')">Регистрация</button>
+      </div>
+
+      <div id="auth-login">
+        <div class="form-row"><label>Email</label><input type="email" id="login-email" placeholder="your@email.com" /></div>
+        <div class="form-row"><label>Пароль</label><input type="password" id="login-pwd" placeholder="Пароль" /></div>
+        <div id="login-msg"></div>
+        <button class="btn primary" style="width:100%;margin-top:4px;height:40px;font-size:14px" id="btn-login" onclick="doLogin()">Войти →</button>
+      </div>
+
+      <div id="auth-register" style="display:none">
+        <div class="alert alert-info" style="font-size:12px">Для регистрации вам нужен код-приглашение от администратора</div>
+        <div class="form-row"><label>Код приглашения</label><input id="reg-code" placeholder="Например: xKpQ7mN2=1234" /></div>
+        <div class="form-row"><label>Имя и фамилия</label><input id="reg-name" placeholder="Иван Иванов" /></div>
+        <div class="form-row"><label>Email</label><input type="email" id="reg-email" placeholder="ivan@mail.ru" /></div>
+        <div class="form-row"><label>Пароль</label><input type="password" id="reg-pwd" placeholder="Минимум 6 символов" /></div>
+        <div id="reg-msg"></div>
+        <button class="btn primary" style="width:100%;margin-top:4px;height:40px;font-size:14px" id="btn-register" onclick="doRegister()">Зарегистрироваться →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== ADMIN PAGE ====== -->
+<div class="page" id="page-admin">
+  <div class="tab-group">
+    <button class="tab-btn active" id="adm-t1" onclick="adminTab('codes')">Коды доступа</button>
+    <button class="tab-btn" id="adm-t2" onclick="adminTab('users')">Пользователи</button>
+    <button class="tab-btn" id="adm-t3" onclick="adminTab('schedule')">Расписание</button>
+    <button class="tab-btn" id="adm-t4" onclick="adminTab('tutors')">Репетиторы</button>
+    <button class="tab-btn" id="adm-t5" onclick="adminTab('students')">Ученики</button>
+    <button class="tab-btn" id="adm-t6" onclick="adminTab('payments')">Оплаты</button>
+  </div>
+
+  <!-- Коды доступа -->
+  <div id="admin-codes">
+    <div class="card">
+      <h3>Создать коды доступа</h3>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
+        Для репетитора — 1 код. Для ученика — создаётся пара кодов: один для ученика, один для его родителя. Оба кода связаны и должны быть переданы вместе.
+      </div>
+      <div class="grid2" style="gap:12px;margin-bottom:12px">
+        <div>
+          <label>Тип</label>
+          <select id="code-type" onchange="onCodeTypeChange()">
+            <option value="tutor">Репетитор</option>
+            <option value="student_parent">Ученик + Родитель (пара)</option>
+          </select>
+        </div>
+        <div><label>Описание (кому)</label><input id="code-desc" placeholder="Напр: Иван Будько" /></div>
+      </div>
+      <button class="btn primary" id="btn-gen-code" onclick="generateCodes()">Сгенерировать</button>
+    </div>
+
+    <div id="codes-result"></div>
+
+    <div class="card">
+      <h3>Существующие коды</h3>
+      <div id="codes-list"><div class="loading"><div class="spinner"></div><br>Загрузка...</div></div>
+    </div>
+  </div>
+
+  <!-- Пользователи -->
+  <div id="admin-users" style="display:none">
+    <div class="card">
+      <h3>Все пользователи системы</h3>
+      <div id="users-table-wrap"><div class="loading"><div class="spinner"></div><br>Загрузка...</div></div>
+    </div>
+  </div>
+
+  <!-- Расписание -->
+  <div id="admin-schedule" style="display:none">
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn sm" onclick="changeMonth(-1)">◀</button>
+          <span style="font-weight:600;font-size:16px" id="adm-month-label"></span>
+          <button class="btn sm" onclick="changeMonth(1)">▶</button>
+        </div>
+        <button class="btn primary sm" onclick="openAddLessonModal()">+ Добавить занятие</button>
+      </div>
+      <div id="admin-cal-grid"></div>
+    </div>
+    <div class="card">
+      <h3>Список занятий</h3>
+      <div id="admin-lessons-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <!-- Репетиторы -->
+  <div id="admin-tutors" style="display:none">
+    <div id="admin-tutors-list"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+
+  <!-- Ученики -->
+  <div id="admin-students" style="display:none">
+    <div id="admin-students-list"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+
+  <!-- Оплаты -->
+  <div id="admin-payments" style="display:none">
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h3 style="margin:0">Финансовый отчёт (из чеков EasyPay)</h3>
+        <div style="display:flex;gap:8px">
+          <button class="btn sm" onclick="triggerEmailParse()">📧 Проверить почту</button>
+          <button class="btn sm primary" onclick="loadAdminPayments()">🔄 Обновить отчёт</button>
+        </div>
+      </div>
+      <div id="admin-parse-result" style="margin-bottom:12px"></div>
+      <div id="admin-payments-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <h3>Все чеки</h3>
+      <div id="admin-receipts-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== TUTOR PAGE ====== -->
+<div class="page" id="page-tutor">
+  <div class="tab-group">
+    <button class="tab-btn active" id="tut-t1" onclick="tutorTab('schedule')">Расписание</button>
+    <button class="tab-btn" id="tut-t2" onclick="tutorTab('students')">Ученики</button>
+    <button class="tab-btn" id="tut-t3" onclick="tutorTab('finance')">Финансы / Акт</button>
+  </div>
+
+  <div id="tutor-schedule">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn sm" onclick="changeMonth(-1)">◀</button>
+        <span style="font-weight:600;font-size:16px" id="tut-month-label"></span>
+        <button class="btn sm" onclick="changeMonth(1)">▶</button>
+      </div>
+      <button class="btn primary" onclick="openAddLessonModal()">+ Добавить занятие</button>
+    </div>
+    <div class="card" style="padding:16px">
+      <div id="tutor-cal-grid"></div>
+    </div>
+    <div class="card">
+      <h3>Занятия в этом месяце</h3>
+      <div id="tutor-lessons-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <div id="tutor-students" style="display:none">
+    <h2>Мои ученики</h2>
+    <div id="tutor-students-list"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+
+  <div id="tutor-finance" style="display:none">
+    <div class="grid3" style="margin-bottom:20px">
+      <div class="stat-card"><div class="stat-num" id="tut-stat-done">—</div><div class="stat-label">Занятий проведено</div></div>
+      <div class="stat-card"><div class="stat-num" id="tut-stat-earn">—</div><div class="stat-label">К получению (BYN)</div></div>
+      <div class="stat-card"><div class="stat-num" id="tut-stat-acts">—</div><div class="stat-label">Актов загружено</div></div>
+    </div>
+    <div class="card">
+      <h3>Акт выполненных работ</h3>
+      <p style="font-size:13px;color:#888;margin-bottom:14px">Скачайте пустой акт, подпишите и загрузите обратно</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="downloadAct()">↓ Скачать пустой акт</button>
+        <label class="btn success" style="cursor:pointer">↑ Загрузить подписанный<input type="file" style="display:none" accept=".pdf,.jpg,.png" onchange="uploadAct(this)"></label>
+      </div>
+      <div id="acts-list" style="margin-top:16px"></div>
+    </div>
+    <div class="card">
+      <h3>Договор подряда</h3>
+      <div id="tutor-contract-info"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+    <div class="card">
+      <h3>Мои отчёты</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span style="font-size:12px;color:#888">Отчёт за каждые 5 занятий</span>
+        <button class="btn sm primary" onclick="openReportModal()">+ Создать отчёт</button>
+      </div>
+      <div id="tutor-reports-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== PARENT PAGE ====== -->
+<div class="page" id="page-parent">
+  <div class="tab-group">
+    <button class="tab-btn active" id="par-t1" onclick="parentTab('schedule')">Расписание</button>
+    <button class="tab-btn" id="par-t2" onclick="parentTab('payments')">Оплаты</button>
+    <button class="tab-btn" id="par-t3" onclick="parentTab('reports')">Отчёты</button>
+    <button class="tab-btn" id="par-t4" onclick="parentTab('contract')">Договор</button>
+    <button class="tab-btn" id="par-t5" onclick="parentTab('comments')">Комментарии</button>
+  </div>
+
+  <div id="parent-schedule">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+      <button class="btn sm" onclick="changeMonth(-1)">◀</button>
+      <span style="font-weight:600;font-size:16px" id="par-month-label"></span>
+      <button class="btn sm" onclick="changeMonth(1)">▶</button>
+    </div>
+    <div class="card" style="padding:16px"><div id="parent-cal-grid"></div></div>
+    <div class="card">
+      <h3>Занятия ребёнка</h3>
+      <div id="parent-lessons-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <div id="parent-payments" style="display:none">
+    <div class="card">
+      <div class="grid3" style="margin-bottom:16px">
+        <div class="stat-card"><div class="stat-num" id="par-paid-total">—</div><div class="stat-label">Оплачено занятий</div></div>
+        <div class="stat-card"><div class="stat-num" style="color:#A32D2D" id="par-unpaid-total">—</div><div class="stat-label">Не оплачено</div></div>
+        <div class="stat-card"><div class="stat-num" id="par-balance">—</div><div class="stat-label">BYN задолженность</div></div>
+      </div>
+      <div class="alert alert-info" style="font-size:12px">
+        Оплата производится лично. Чеки отправляйте на <strong>pay@pifagor.by</strong>. Система автоматически обработает чек.
+      </div>
+      <h3 style="margin-top:12px">История оплат</h3>
+      <div id="parent-payments-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <div id="parent-reports" style="display:none">
+    <h2>Отчёты об успехах</h2>
+    <div id="parent-reports-list"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+
+  <div id="parent-contract" style="display:none">
+    <div class="card">
+      <h3>Договор об оказании услуг</h3>
+      <div id="parent-contract-info"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <div id="parent-comments" style="display:none">
+    <div class="card">
+      <h3>Написать комментарий репетитору</h3>
+      <div class="form-row"><label>Сообщение</label><textarea id="comment-text" placeholder="Ваш комментарий репетитору..."></textarea></div>
+      <button class="btn primary" onclick="sendComment()">Отправить</button>
+    </div>
+    <div class="card">
+      <h3>История комментариев</h3>
+      <div id="parent-comments-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== CHILD PAGE ====== -->
+<div class="page" id="page-child">
+  <div class="tab-group">
+    <button class="tab-btn active" id="ch-t1" onclick="childTab('schedule')">Расписание</button>
+    <button class="tab-btn" id="ch-t2" onclick="childTab('homework')">Домашнее задание</button>
+  </div>
+
+  <div id="child-schedule">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+      <button class="btn sm" onclick="changeMonth(-1)">◀</button>
+      <span style="font-weight:600;font-size:16px" id="ch-month-label"></span>
+      <button class="btn sm" onclick="changeMonth(1)">▶</button>
+    </div>
+    <div class="card" style="padding:16px"><div id="child-cal-grid"></div></div>
+    <div class="card">
+      <h3>Мои занятия</h3>
+      <div id="child-lessons-list"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+
+  <div id="child-homework" style="display:none">
+    <h2>Домашние задания</h2>
+    <div id="hw-list"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+</div>
+
+<!-- ====== MODALS ====== -->
+
+<!-- Add Lesson -->
+<div class="modal-overlay" id="modal-lesson">
+  <div class="modal">
+    <div class="modal-title">Новое занятие <button class="btn sm" onclick="closeModal('modal-lesson')">✕</button></div>
+    <div class="form-row" id="ls-tutor-row" style="display:none"><label>Репетитор</label><select id="ls-tutor"></select></div>
+    <div class="form-row"><label>Ученик</label><select id="ls-student"></select></div>
+    <div class="form-row"><label>Предмет</label><select id="ls-subj"></select></div>
+    <div class="form-row"><label>Дата</label><input type="date" id="ls-date" /></div>
+    <div class="form-row"><label>Время</label><input type="time" id="ls-time" value="15:00" /></div>
+    <div class="form-row"><label>Длительность (мин)</label><input type="number" id="ls-duration" value="60" /></div>
+    <div class="form-row"><label>Стоимость (BYN)</label><input type="number" id="ls-price" value="80" /></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn primary" id="btn-add-lesson" onclick="addLesson()">Добавить</button>
+      <button class="btn" onclick="closeModal('modal-lesson')">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Lesson detail -->
+<div class="modal-overlay" id="modal-lesson-detail">
+  <div class="modal">
+    <div class="modal-title" id="detail-title">Занятие <button class="btn sm" onclick="closeModal('modal-lesson-detail')">✕</button></div>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<!-- Report -->
+<div class="modal-overlay" id="modal-report">
+  <div class="modal">
+    <div class="modal-title">Отчёт за занятия <button class="btn sm" onclick="closeModal('modal-report')">✕</button></div>
+    <div class="form-row"><label>Ученик</label><select id="rp-student"></select></div>
+    <div class="form-row"><label>Кол-во занятий в отчёте</label><input type="number" id="rp-lessons" value="5" min="1" /></div>
+    <div class="form-row"><label>Текст отчёта</label><textarea id="rp-content" rows="5" placeholder="Опишите прогресс ученика..."></textarea></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn primary" onclick="submitReport()">Сохранить</button>
+      <button class="btn" onclick="closeModal('modal-report')">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+// ============================================================
+//  CONFIG
+// ============================================================
+const API = window.location.origin + '/api/v1';
+
+// ============================================================
+//  STATE
+// ============================================================
+let currentUser = null;
+let token = null;
+let currentMonth = new Date();
+let cachedLessons = [];
+let cachedStudents = [];
+let cachedSubjects = [];
+
+// ============================================================
+//  API HELPER
+// ============================================================
+async function api(method, path, body = null, isFormData = false) {
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (!isFormData && body) headers['Content-Type'] = 'application/json';
+
+  const opts = { method, headers };
+  if (body) opts.body = isFormData ? body : JSON.stringify(body);
+
+  try {
+    const res = await fetch(API + path, opts);
+    if (res.status === 401) { logout(); return null; }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Ошибка сервера' }));
+      throw new Error(err.detail || 'Ошибка ' + res.status);
+    }
+    if (res.status === 204) return true;
+    return await res.json();
+  } catch (e) {
+    toast('❌ ' + e.message, 'error');
+    throw e;
+  }
+}
+
+const get  = (path)        => api('GET',    path);
+const post = (path, body)  => api('POST',   path, body);
+const patch= (path, body)  => api('PATCH',  path, body);
+const del  = (path)        => api('DELETE', path);
+
+// ============================================================
+//  AUTH
+// ============================================================
+function switchAuth(t) {
+  document.getElementById('auth-login').style.display    = t === 'login'    ? 'block' : 'none';
+  document.getElementById('auth-register').style.display = t === 'register' ? 'block' : 'none';
+  document.getElementById('tab-login').classList.toggle('active', t === 'login');
+  document.getElementById('tab-register').classList.toggle('active', t === 'register');
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pwd   = document.getElementById('login-pwd').value;
+  const msg   = document.getElementById('login-msg');
+  const btn   = document.getElementById('btn-login');
+  if (!email || !pwd) { msg.innerHTML = err('Введите email и пароль'); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Входим...';
+  msg.innerHTML = '';
+
+  // Сбор данных в виде обычного объекта JSON строго по твоей схеме из Swagger
+  const payload = {
+    email: email,
+    password: pwd
+  };
+
+  try {
+    // ВАЖНО: твой эндпоинт в Swagger называется /api/v1/auth/login.
+    // Так как префикс /api/v1 уже зашит в константу API, мы делаем запрос на '/auth/login'.
+    // Передаем payload как обычный объект (наша обертка api() сама превратит его в JSON).
+    const data = await api('POST', '/auth/login', payload, false);
+    if (!data) return;
+
+    // Сохраняем токен, который вернул бэкенд (проверь в Swagger, как называется поле токена, обычно access_token или token)
+    token = data.access_token || data.token;
+    localStorage.setItem('pifagor_token', token);
+
+    // Получаем данные о текущем пользователе
+    const me = await get('/users/me');
+    if (!me) return;
+    currentUser = me;
+    afterLogin();
+  } catch(e) {
+    msg.innerHTML = err('Неверный email или пароль');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Войти →';
+  }
+}
+
+async function doRegister() {
+  const code  = document.getElementById('reg-code').value.trim();
+  const name  = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const pwd   = document.getElementById('reg-pwd').value;
+  const msg   = document.getElementById('reg-msg');
+  const btn   = document.getElementById('btn-register');
+
+  if (!name || !email || !pwd || !code) {
+    if (msg) msg.innerHTML = err('Заполните все обязательные поля (включая Код доступа)');
+    return;
+  }
+  if (pwd.length < 6) {
+    if (msg) msg.innerHTML = err('Пароль минимум 6 символов');
+    return;
+  }
+
+  const nameParts = name.split(' ');
+  const firstName = nameParts[0] || 'Имя';
+  const lastName  = nameParts[1] || 'Фамилия';
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Проверка кода...';
+  }
+
+  let finalRole = "child"; // Роль по умолчанию
+
+  try {
+    // 1. Запрашиваем у бэкенда список всех созданных инвайт-кодов
+    // (Используем твой эндпоинт /admin/invite-codes)
+    const inviteCodes = await get('/admin/invite-codes');
+
+    if (Array.isArray(inviteCodes)) {
+      // Ищем в списке тот код, который ввёл пользователь в форму
+      const foundInvite = inviteCodes.find(i => i.code === code);
+
+      if (foundInvite) {
+        // Если код найден, берём ЕГО РОЛЬ ИЗ БАЗЫ ДАННЫХ бэкенда!
+        finalRole = foundInvite.role;
+        console.log(`[Успех] Код найден! Роль из базы: ${finalRole}`);
+      } else {
+        if (msg) msg.innerHTML = err('Ошибка: Указанный код доступа не существует в системе');
+        if (btn) { btn.disabled = false; btn.innerHTML = 'Зарегистрироваться →'; }
+        return;
+      }
+    }
+  } catch (inviteError) {
+    console.warn("Не удалось проверить код через /admin/invite-codes, включаем запасной режим по буквам:", inviteError);
+    // На случай, если эндпоинт /admin/ закрыт для гостей, оставляем безопасный разбор по буквам:
+    const lower = code.toLowerCase();
+    if (lower.includes('tutor') || lower.includes('rep')) finalRole = "tutor";
+    else if (lower.includes('admin')) finalRole = "admin";
+  }
+
+  // Обновляем текст на кнопке
+  if (btn) btn.innerHTML = '<span class="spinner"></span> Создание аккаунта...';
+
+  // 2. Формируем payload с ПРАВИЛЬНОЙ ролью, полученной прямо из базы
+  const payload = {
+    email: email,
+    first_name: firstName,
+    last_name: lastName,
+    middle_name: "",
+    phone: "+375000000000",
+    password: pwd,
+    role: finalRole,       // Сюда улетит tutor, child или admin из твоей таблицы инвайтов!
+    invite_code: code
+  };
+
+  try {
+    // 3. Отправляем запрос на регистрацию
+    await post('/auth/register', payload);
+
+    if (msg) msg.innerHTML = '<div class="alert alert-success">✓ Регистрация успешна! Перенаправление...</div>';
+
+    setTimeout(() => {
+      window.location.reload();
+    }, 1500);
+
+  } catch(e) {
+    console.error("Ошибка при регистрации:", e);
+    let errorText = 'Неверный код или email уже занят';
+    if (e && typeof e === 'object' && e.detail) {
+      errorText = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail);
+    }
+    if (msg) msg.innerHTML = err('Ошибка регистрации: ' + errorText);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = 'Зарегистрироваться →';
+    }
+  }
+}
+
+function afterLogin() {
+  const roleTabMap = { admin: 'tab-admin', tutor: 'tab-tutor', parent: 'tab-parent', child: 'tab-child' };
+  ['tab-admin','tab-tutor','tab-parent','tab-child'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  const myTab = roleTabMap[currentUser.role];
+  if (myTab) document.getElementById(myTab).style.display = '';
+  document.getElementById('btn-logout').style.display = '';
+
+  toast('Добро пожаловать, ' + (currentUser.full_name || currentUser.email) + '!');
+  showPage(currentUser.role);
+  initRolePage(currentUser.role);
+}
+
+async function tryAutoLogin() {
+  const saved = localStorage.getItem('pifagor_token');
+  if (!saved) return;
+  token = saved;
+  try {
+    const me = await get('/users/me');
+    if (me) { currentUser = me; afterLogin(); }
+  } catch { localStorage.removeItem('pifagor_token'); token = null; }
+}
+
+function logout() {
+  token = null;
+  currentUser = null;
+  localStorage.removeItem('pifagor_token');
+  cachedLessons = [];
+  ['tab-admin','tab-tutor','tab-parent','tab-child','btn-logout'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-pwd').value = '';
+  showPage('auth');
+}
+
+// ============================================================
+//  INIT ROLE PAGES
+// ============================================================
+async function initRolePage(role) {
+  currentMonth = new Date();
+  if (role === 'admin') {
+    await loadAdminCodes();
+    await loadUsers();
+  }
+  if (role === 'tutor') {
+    await loadTutorSchedule();
+  }
+  if (role === 'parent') {
+    await loadParentSchedule();
+    await loadParentPayments();
+    await loadParentReports();
+    await loadParentContract();
+    await loadParentComments();
+  }
+  if (role === 'child') {
+    await loadChildSchedule();
+    await loadHomeworks();
+  }
+  // Pre-load common data
+  await loadSubjects();
+}
+
+// ============================================================
+//  PAGE NAVIGATION
+// ============================================================
+function showPage(p) {
+  document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
+  document.getElementById('page-' + p).classList.add('active');
+}
+
+function adminTab(tab) {
+  const tabs = ['codes','users','schedule','tutors','students','payments'];
+  tabs.forEach((t, i) => {
+    document.getElementById('admin-' + t).style.display = t === tab ? '' : 'none';
+    document.getElementById('adm-t' + (i+1)).classList.toggle('active', t === tab);
+  });
+  if (tab === 'schedule') { renderCalendar('admin-cal-grid', 'adm-month-label'); loadAdminLessons(); }
+  if (tab === 'tutors') loadAdminTutors();
+  if (tab === 'students') loadAdminStudents();
+  if (tab === 'payments') loadAdminPayments();
+}
+
+function tutorTab(tab) {
+  ['schedule','students','finance'].forEach((t,i) => {
+    document.getElementById('tutor-' + t).style.display = t === tab ? '' : 'none';
+    document.getElementById('tut-t' + (i+1)).classList.toggle('active', t === tab);
+  });
+  if (tab === 'schedule') { renderCalendar('tutor-cal-grid', 'tut-month-label'); loadTutorSchedule(); }
+  if (tab === 'students') { loadTutorStudents(); }
+  if (tab === 'finance')  { loadTutorFinance(); }
+}
+
+function parentTab(tab) {
+  ['schedule','payments','reports','contract','comments'].forEach((t,i) => {
+    document.getElementById('parent-' + t).style.display = t === tab ? '' : 'none';
+    document.getElementById('par-t' + (i+1)).classList.toggle('active', t === tab);
+  });
+  if (tab === 'schedule') renderCalendar('parent-cal-grid', 'par-month-label');
+}
+
+function childTab(tab) {
+  ['schedule','homework'].forEach((t,i) => {
+    document.getElementById('child-' + t).style.display = t === tab ? '' : 'none';
+    document.getElementById('ch-t' + (i+1)).classList.toggle('active', t === tab);
+  });
+  if (tab === 'schedule') renderCalendar('child-cal-grid', 'ch-month-label');
+}
+
+// ============================================================
+//  CALENDAR RENDERER (client-side grid from cached lessons)
+// ============================================================
+const MONTHS_RU = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+const DAYS_RU   = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+
+function renderCalendar(gridId, labelId) {
+  const el = document.getElementById(gridId);
+  const lb = document.getElementById(labelId);
+  if (!el) return;
+  if (lb) lb.textContent = MONTHS_RU[currentMonth.getMonth()] + ' ' + currentMonth.getFullYear();
+
+  const year  = currentMonth.getFullYear();
+  const month = currentMonth.getMonth();
+  const first = new Date(year, month, 1);
+  const last  = new Date(year, month + 1, 0);
+  let startDow = first.getDay(); // 0=Sun
+  if (startDow === 0) startDow = 7; // make Mon=1
+  const today = new Date().toISOString().slice(0, 10);
+
+  let html = DAYS_RU.map(d => `<div class="cal-header">${d}</div>`).join('');
+
+  for (let i = 1; i < startDow; i++) html += '<div class="cal-day empty"></div>';
+
+  for (let d = 1; d <= last.getDate(); d++) {
+    const dateStr = year + '-' + String(month + 1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+    const dayLessons = cachedLessons.filter(l => l.lesson_date === dateStr || l.date === dateStr);
+    const isToday = dateStr === today;
+
+    html += `<div class="cal-day ${dayLessons.length ? 'has-lesson' : ''} ${isToday ? 'today' : ''}">
+      <div class="cal-day-num">${d}</div>`;
+
+    dayLessons.forEach(l => {
+      const cls = l.status === 'cancelled' ? 'cancelled' : l.is_paid ? 'paid' : 'unpaid';
+      const subj = l.subject_name || l.subject || '';
+      const time = (l.lesson_time || l.time || '').slice(0,5);
+      html += `<div class="cal-lesson ${cls}" title="${subj}" onclick="showLessonDetail(${l.id})">${time} ${subj}</div>`;
+    });
+
+    html += '</div>';
+  }
+  el.innerHTML = `<div class="cal-grid">${html}</div>`;
+}
+
+function changeMonth(dir) {
+  currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + dir, 1);
+  if (currentUser?.role === 'admin')  { loadAdminLessons(); }
+  if (currentUser?.role === 'tutor')  { loadTutorSchedule(); }
+  if (currentUser?.role === 'parent') { loadParentSchedule(); }
+  if (currentUser?.role === 'child')  { loadChildSchedule(); }
+}
+
+// ============================================================
+//  ADMIN — CODES
+// ============================================================
+function onCodeTypeChange() {
+  // nothing extra needed visually
+}
+
+async function generateCodes() {
+  const type = document.getElementById('code-type').value;
+  const desc = document.getElementById('code-desc').value.trim();
+  const btn  = document.getElementById('btn-gen-code'); // Твой оригинальный ID кнопки
+
+  // Безопасно ищем блок для сообщений (если msg не объявлен глобально, ищем по ID)
+  const messageBlock = document.getElementById('code-msg') || (typeof msg !== 'undefined' ? msg : null);
+
+  if (!btn) {
+    console.error("Кнопка 'btn-gen-code' не найдена на странице!");
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Генерируем...';
+
+  try {
+    // Отправляем запрос на бэкенд через твою встроенную функцию api()
+    const res = await api('POST', '/admin/invite-codes', { role: type, description: desc });
+    if (!res) return;
+
+    if (messageBlock) {
+      messageBlock.innerHTML = '<div class="alert alert-success">✓ Коды созданы! Передайте их пользователям:</div>';
+
+      if (type === 'tutor') {
+        const tutorCode = Array.isArray(res) ? res[0].code : res.code;
+        messageBlock.innerHTML += `
+          <div class="card" style="margin-top:10px; background:#f9f9f9; padding: 12px; border-radius: 6px;">
+            <div style="font-weight:600;color:#555;margin-bottom:4px">Репетитор</div>
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <code style="font-size:16px;font-weight:700;color:#111">${tutorCode}</code>
+              <button class="btn btn-sm" onclick="navigator.clipboard.writeText('${tutorCode}');alert('Скопировано!')">📋 Копировать</button>
+            </div>
+          </div>`;
+      } else {
+        const childCode = res[0].code;
+        const parentCode = res[1].code;
+        messageBlock.innerHTML += `
+          <div class="card" style="margin-top:10px; background:#f9f9f9; padding: 12px; border-radius: 6px;">
+            <div style="font-weight:600;color:#28a745;margin-bottom:4px">Код Ученика</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <code style="font-size:16px;font-weight:700;color:#111">${childCode}</code>
+              <button class="btn btn-sm" onclick="navigator.clipboard.writeText('${childCode}');alert('Скопировано!')">📋 Копировать</button>
+            </div>
+            <div style="font-weight:600;color:#007bff;margin-bottom:4px">Код Родителя</div>
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <code style="font-size:16px;font-weight:700;color:#111">${parentCode}</code>
+              <button class="btn btn-sm" onclick="navigator.clipboard.writeText('${parentCode}');alert('Скопировано!')">📋 Копировать</button>
+            </div>
+          </div>`;
+      }
+    }
+
+    // Обновляем таблицу со списком всех кодов внизу страницы
+    if (typeof loadAdminCodes === 'function') {
+      await loadAdminCodes();
+    }
+
+  } catch(e) {
+    console.error(e);
+    if (messageBlock && typeof err === 'function') {
+      messageBlock.innerHTML = err('Ошибка генерации: ' + e.message);
+    }
+  } finally {
+    // ВАЖНО: этот блок вернет кнопку в нормальное состояние при любом исходе запроса!
+    btn.disabled = false;
+    btn.innerHTML = 'Сгенерировать';
+  }
+}
+
+function showGeneratedCode(pairs) {
+  const el = document.getElementById('codes-result');
+  el.innerHTML = `<div class="card" style="border-color:#7F77DD">
+    <div class="alert alert-success">✓ Коды созданы! Передайте их пользователям:</div>
+    ${pairs.map(p => `
+      <div style="margin-bottom:10px">
+        <label>${p.label}</label>
+        <div class="code-box">
+          <span id="code-${p.role}">${p.code}</span>
+          <button class="btn sm" onclick="copyCode('code-${p.role}')">📋 Копировать</button>
+        </div>
+      </div>`).join('')}
+  </div>`;
+}
+
+function copyCode(id) {
+  const text = document.getElementById(id)?.textContent;
+  if (text) { navigator.clipboard.writeText(text); toast('Скопировано!'); }
+}
+
+async function loadAdminCodes() {
+  const el = document.getElementById('codes-list');
+  try {
+    const codes = await get('/admin/invite-codes');
+    if (!codes?.length) { el.innerHTML = '<div style="color:#888;font-size:13px">Кодов нет</div>'; return; }
+    el.innerHTML = `<table>
+      <thead><tr><th>Код</th><th>Роль</th><th>Описание</th><th>Создан</th><th>Статус</th></tr></thead>
+      <tbody>${codes.map(c => `
+        <tr>
+          <td style="font-family:monospace;font-size:13px">${c.code}</td>
+          <td><span class="badge ${roleBadge(c.role)}">${roleLabel(c.role)}</span></td>
+          <td style="color:#888">${c.description || '—'}</td>
+          <td style="color:#888">${(c.created_at || '').slice(0,10)}</td>
+          <td><span class="badge ${c.is_used ? 'badge-gray' : 'badge-green'}">${c.is_used ? 'Использован' : 'Активен'}</span></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } catch(e) { el.innerHTML = errBox('Не удалось загрузить коды'); }
+}
+
+// ============================================================
+//  ADMIN — USERS
+// ============================================================
+async function loadUsers() {
+  // Проверяем оба возможных ID контейнера для надежности
+  const el = document.getElementById('users-table-wrap') || document.getElementById('admin-users-list');
+  if (!el) {
+    console.error("Контейнер для списка пользователей не найден в HTML!");
+    return;
+  }
+
+  try {
+    const users = await get('/users/');
+    if (!users || !users.length) {
+      el.innerHTML = '<div style="color:#888; padding:15px;">Нет пользователей в базе данных</div>';
+      return;
+    }
+
+    // Простая и надежная таблица без вызова внешних функций badge
+    el.innerHTML = `
+      <div style="overflow-x:auto;">
+        <table class="table" style="width:100%; border-collapse:collapse; margin-top:15px;">
+          <thead>
+            <tr style="background:#f4f4f4; text-align:left;">
+              <th style="padding:10px; border-bottom:2px solid #ddd;">ФИО</th>
+              <th style="padding:10px; border-bottom:2px solid #ddd;">Email</th>
+              <th style="padding:10px; border-bottom:2px solid #ddd;">Роль в системе</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${users.map(u => {
+              // Локальный перевод ролей, чтобы ничего не падало
+              let roleName = u.role;
+              if (u.role === 'admin') roleName = 'Администратор';
+              if (u.role === 'tutor') roleName = 'Репетитор';
+              if (u.role === 'parent') roleName = 'Родитель';
+              if (u.role === 'child' || u.role === 'student') roleName = 'Ученик';
+
+              return `
+                <tr style="border-bottom:1px solid #eee;">
+                  <td style="padding:10px; font-weight:500;">${u.last_name || ''} ${u.first_name || ''}</td>
+                  <td style="padding:10px; color:#555;">${u.email}</td>
+                  <td style="padding:10px;"><mark style="padding:3px 6px; border-radius:4px; background:#e2e3e5;">${roleName}</mark></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch(e) {
+    console.error("Ошибка в loadUsers:", e);
+    el.innerHTML = `<div class="alert alert-danger">Не удалось загрузить пользователей: ${e.message}</div>`;
+  }
+}
+
+// ============================================================
+//  ADMIN — SCHEDULE / LESSONS
+// ============================================================
+async function loadAdminLessons() {
+  const el = document.getElementById('admin-lessons-list');
+  if (!el) return;
+
+  const ym = monthParam();
+
+  try {
+
+    const dateFrom = `${ym}-01`;
+    const year = parseInt(ym.split('-')[0]);
+    const month = parseInt(ym.split('-')[1]);
+    const lastDay = new Date(year, month, 0).getDate();
+    const dateTo = `${ym}-${lastDay}`;
+
+    const lessons = await get(`/lessons/?date_from=${dateFrom}&date_to=${dateTo}`);
+
+    cachedLessons = lessons || [];
+    renderCalendar('admin-cal-grid', 'adm-month-label');
+    el.innerHTML = renderLessonsTable(lessons, true);
+
+  } catch(e) {
+    console.error("Ошибка календаря:", e);
+    el.innerHTML = errBox('Не удалось загрузить занятия');
+  }
+}
+
+async function loadAdminTutors() {
+  const el = document.getElementById('admin-tutors-list');
+  if (!el) return;
+  try {
+    // Вместо /admin/tutors стучимся на правильный эндпоинт бэкенда
+    const allUsers = await get('/users/');
+
+    // Фильтруем: оставляем только пользователей с ролью "tutor"
+    const tutors = allUsers.filter(u => u.role === 'tutor');
+
+    if (!tutors || !tutors.length) {
+      el.innerHTML = '<div class="alert alert-info">Репетиторов не найдено</div>';
+      return;
+    }
+
+    el.innerHTML = tutors.map(t => `
+      <div class="card" style="margin-bottom:10px; padding:15px; border-radius:8px; border:1px solid #ddd;">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-weight:600;font-size:15px">${t.last_name || ''} ${t.first_name || ''}</div>
+            <div style="font-size:12px;color:#888">${t.email}</div>
+          </div>
+          <span class="badge badge-purple" style="background:#6f42c1; color:#fff; padding:4px 8px; border-radius:4px; font-size:12px;">Репетитор</span>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    el.innerHTML = errBox('Ошибка загрузки репетиторов: ' + e.message);
+  }
+}
+
+async function loadAdminStudents() {
+  const el = document.getElementById('admin-students-list');
+  if (!el) return;
+  try {
+    // Стучимся на тот же общий эндпоинт
+    const allUsers = await get('/users/');
+
+    // Фильтруем: оставляем только учеников (в базе это роль "child")
+    const students = allUsers.filter(u => u.role === 'child');
+
+    if (!students || !students.length) {
+      el.innerHTML = '<div class="alert alert-info">Учеников не найдено</div>';
+      return;
+    }
+
+    el.innerHTML = students.map(s => `
+      <div class="card" style="margin-bottom:10px; padding:15px; border-radius:8px; border:1px solid #ddd;">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-weight:600;font-size:15px">${s.last_name || ''} ${s.first_name || ''}</div>
+            <div style="font-size:12px;color:#888">${s.email}</div>
+          </div>
+          <span class="badge badge-green" style="background:#28a745; color:#fff; padding:4px 8px; border-radius:4px; font-size:12px;">Ученик</span>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    el.innerHTML = errBox('Ошибка загрузки учеников: ' + e.message);
+  }
+}
+
+async function loadAdminPayments() {
+  const reportEl   = document.getElementById('admin-payments-list');
+  const receiptsEl = document.getElementById('admin-receipts-list');
+
+  // Weekly finance report
+  if (reportEl) {
+    try {
+      const report = await get('/admin/finance-report');
+      if (!report?.length) {
+        reportEl.innerHTML = '<div class="alert alert-info">На этой неделе проведённых занятий или чеков нет.</div>';
+      } else {
+        reportEl.innerHTML = `<table>
+          <thead><tr><th>Ученик</th><th>Проведено занятий</th><th>Оплачено занятий</th><th>Сумма оплат</th></tr></thead>
+          <tbody>${report.map(r => `
+            <tr>
+              <td style="font-weight:600">${r.student_name}</td>
+              <td>${r.lessons_conducted}</td>
+              <td><span class="badge ${r.lessons_paid >= r.lessons_conducted ? 'badge-green' : 'badge-amber'}">${r.lessons_paid}/${r.lessons_conducted}</span></td>
+              <td>${r.amount_paid} BYN</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+    } catch(e) {
+      reportEl.innerHTML = errBox('Не удалось загрузить финансовый отчёт');
+    }
+  }
+
+  // All receipts table
+  if (receiptsEl) {
+    try {
+      const receipts = await get('/admin/receipts');
+      if (!receipts?.length) {
+        receiptsEl.innerHTML = '<div style="color:#888;font-size:13px">Чеков нет. Нажмите «Проверить почту» для парсинга.</div>';
+      } else {
+        receiptsEl.innerHTML = `<table>
+          <thead><tr><th>Дата</th><th>Плательщик</th><th>Ученик</th><th>Сумма</th><th>Номер чека</th></tr></thead>
+          <tbody>${receipts.map(r => `
+            <tr>
+              <td>${(r.payment_date || r.created_at || '').slice(0,10)}</td>
+              <td>${r.payer_name}</td>
+              <td>${r.student_name || '<span style="color:#aaa">не сопоставлен</span>'}</td>
+              <td style="font-weight:500">${r.amount} BYN</td>
+              <td style="font-family:monospace;font-size:11px;color:#888">${r.receipt_number || '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+    } catch(e) {
+      receiptsEl.innerHTML = errBox('Не удалось загрузить чеки');
+    }
+  }
+}
+
+async function triggerEmailParse() {
+  const resultEl = document.getElementById('admin-parse-result');
+  if (resultEl) resultEl.innerHTML = '<div class="loading"><div class="spinner"></div> Проверяем почту...</div>';
+  try {
+    const res = await post('/admin/receipts/parse-emails', {});
+    if (resultEl) resultEl.innerHTML = `<div class="alert alert-success">${res.message}</div>`;
+    await loadAdminPayments();
+  } catch(e) {
+    if (resultEl) resultEl.innerHTML = errBox('Ошибка при проверке почты: ' + e.message);
+  }
+}
+
+// ============================================================
+//  TUTOR PAGES
+// ============================================================
+async function loadTutorSchedule() {
+  const el = document.getElementById('tutor-lessons-list');
+  try {
+    const ym = monthParam();
+    const year  = parseInt(ym.split('-')[0]);
+    const month = parseInt(ym.split('-')[1]);
+    const lastDay = new Date(year, month, 0).getDate();
+    const dateFrom = `${ym}-01`;
+    const dateTo   = `${ym}-${String(lastDay).padStart(2,'0')}`;
+
+    const lessons = await get(`/lessons/?date_from=${dateFrom}&date_to=${dateTo}`);
+    cachedLessons = lessons || [];
+    renderCalendar('tutor-cal-grid', 'tut-month-label');
+    if (el) el.innerHTML = renderLessonsTable(cachedLessons, false);
+  } catch(e) {
+    console.error("Ошибка loadTutorSchedule:", e);
+    if (el) el.innerHTML = errBox('Не удалось загрузить занятия');
+  }
+}
+
+async function loadTutorStudents() {
+  const el = document.getElementById('tutor-students-list');
+  if (!el) return;
+  try {
+    const students = await get('/lessons/tutor/my-students');
+    if (!students || students.length === 0) {
+      el.innerHTML = '<div class="alert alert-info">У вас пока нет учеников. Добавьте занятие — ученик появится здесь.</div>';
+      return;
+    }
+    el.innerHTML = students.map(s => `
+      <div class="lesson-card">
+        <div>
+          <div style="font-weight:600">${s.last_name || ''} ${s.first_name || ''}</div>
+          <div style="font-size:12px;color:#888">${s.email}</div>
+        </div>
+        <span class="badge badge-purple">Ученик</span>
+      </div>
+    `).join('');
+  } catch(e) {
+    el.innerHTML = errBox('Не удалось загрузить список учеников');
+  }
+}
+
+async function loadTutorFinance() {
+  try {
+    // Finance stats
+    const data = await get('/tutor/finance').catch(() => null);
+    if (data) {
+      document.getElementById('tut-stat-done').textContent = data.lessons_done ?? '—';
+      document.getElementById('tut-stat-earn').textContent = (data.earnings ?? '—') + ' BYN';
+      document.getElementById('tut-stat-acts').textContent = data.acts_count ?? '—';
+    }
+
+    // Acts
+    const acts = await get('/acts').catch(() => []);
+    const actsEl = document.getElementById('acts-list');
+    if (actsEl) {
+      actsEl.innerHTML = acts?.length
+        ? '<div style="font-size:12px;color:#888;margin-bottom:8px">Загруженные акты:</div>' +
+          acts.map(a => `<div class="lesson-card">
+            <div>
+              <div style="font-weight:500">Акт ${(a.period_start||'').slice(0,10)} — ${(a.period_end||'').slice(0,10)}</div>
+              <div style="font-size:12px;color:#888">${a.lessons_count} занятий · ${a.total_amount} BYN</div>
+            </div>
+            <span class="badge ${a.signed_url ? 'badge-green' : 'badge-amber'}">${a.signed_url ? 'Загружен' : 'Без подписи'}</span>
+          </div>`).join('')
+        : '<div style="color:#888;font-size:13px">Актов пока нет</div>';
+    }
+
+    // Contract
+    const contracts = await get('/contracts/tutor').catch(() => []);
+    const cel = document.getElementById('tutor-contract-info');
+    if (cel) {
+      const contract = contracts?.[0];
+      cel.innerHTML = contract
+        ? `<div style="display:flex;align-items:center;justify-content:space-between">
+            <div>
+              <div style="font-weight:500">Договор (загружен)</div>
+              <div style="font-size:12px;color:#888">от ${(contract.created_at || '').slice(0,10)}</div>
+            </div>
+            <button class="btn sm" onclick="window.open('${contract.file_url}','_blank')">↓ Скачать</button>
+          </div>`
+        : '<div style="color:#888;font-size:13px">Договор не загружен администратором</div>';
+    }
+
+    // Reports
+    const reports = await get('/reports').catch(() => []);
+    const rel = document.getElementById('tutor-reports-list');
+    if (rel) {
+      rel.innerHTML = reports?.length
+        ? reports.map(r => reportCard(r)).join('')
+        : '<div style="color:#888;font-size:13px">Отчётов пока нет</div>';
+    }
+  } catch(e) { console.error("loadTutorFinance error:", e); }
+}
+
+// ============================================================
+//  PARENT PAGES
+// ============================================================
+async function loadParentSchedule() {
+  const el = document.getElementById('parent-lessons-list');
+  try {
+    const ym = monthParam();
+    const year  = parseInt(ym.split('-')[0]);
+    const month = parseInt(ym.split('-')[1]);
+    const lastDay = new Date(year, month, 0).getDate();
+    const dateFrom = `${ym}-01`;
+    const dateTo   = `${ym}-${String(lastDay).padStart(2,'0')}`;
+    // Backend filters by parent's linked children automatically
+    const lessons = await get(`/lessons/?date_from=${dateFrom}&date_to=${dateTo}`);
+    cachedLessons = lessons || [];
+    renderCalendar('parent-cal-grid', 'par-month-label');
+    if (el) el.innerHTML = renderLessonsTable(cachedLessons, false);
+  } catch(e) {
+    if (el) el.innerHTML = errBox('Не удалось загрузить расписание');
+  }
+}
+
+async function loadParentPayments() {
+  const el = document.getElementById('parent-payments-list');
+  try {
+    const payments = await get('/payments');
+    const paid   = (payments || []).filter(p => p.is_paid).length;
+    const unpaid = (payments || []).filter(p => !p.is_paid).length;
+    const debt   = (payments || []).filter(p => !p.is_paid).reduce((s, p) => s + (p.amount || 0), 0);
+    document.getElementById('par-paid-total').textContent   = paid;
+    document.getElementById('par-unpaid-total').textContent = unpaid;
+    document.getElementById('par-balance').textContent      = debt.toFixed(2) + ' BYN';
+
+    if (!payments?.length) { el.innerHTML = '<div style="color:#888;font-size:13px">Платежей пока нет</div>'; return; }
+    el.innerHTML = payments.map(p => `
+      <div class="payment-row">
+        <div>
+          <div style="font-weight:500">${(p.created_at || '').slice(0,10)}</div>
+          <div style="font-size:12px;color:#888">${p.description || '—'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="badge badge-green" style="font-size:13px">${p.amount} BYN</span>
+          <span class="badge ${p.is_paid ? 'badge-green' : 'badge-amber'}">${p.is_paid ? 'Оплачено' : 'Ожидает'}</span>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = errBox('Ошибка загрузки оплат'); }
+}
+
+async function loadParentReports() {
+  const el = document.getElementById('parent-reports-list');
+  try {
+    const reports = await get('/reports');
+    el.innerHTML = reports?.length
+      ? reports.map(r => reportCard(r)).join('')
+      : '<div class="alert alert-info">Отчётов пока нет</div>';
+  } catch(e) { el.innerHTML = errBox('Ошибка загрузки отчётов'); }
+}
+
+async function loadParentContract() {
+  const el = document.getElementById('parent-contract-info');
+  try {
+    const contracts = await get('/contracts/parent');
+    const c = contracts?.[0];
+    if (!c) { el.innerHTML = '<div style="color:#888;font-size:13px">Договор не загружен администратором</div>'; return; }
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0">
+        <div>
+          <div style="font-weight:500">Договор (загружен)</div>
+          <div style="font-size:12px;color:#888">от ${(c.created_at || '').slice(0,10)} · <span class="badge ${c.is_signed ? 'badge-green' : 'badge-amber'}">${c.is_signed ? 'Подписан' : 'Ожидает подписи'}</span></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn sm" onclick="window.open('${c.file_url}','_blank')">↓ Скачать</button>
+        </div>
+      </div>`;
+  } catch(e) { el.innerHTML = errBox('Ошибка загрузки договора'); }
+}
+
+async function loadParentComments() {
+  const el = document.getElementById('parent-comments-list');
+  try {
+    const items = await get('/comments');
+    el.innerHTML = items?.length
+      ? items.map(c => `<div class="card-sm" style="margin-bottom:8px">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">${(c.created_at || '').slice(0,10)}</div>
+          <div style="font-size:13px">${c.text}</div>
+        </div>`).join('')
+      : '<div style="color:#888;font-size:13px">Комментариев нет</div>';
+  } catch(e) {}
+}
+
+async function sendComment() {
+  const text = document.getElementById('comment-text').value.trim();
+  if (!text) { toast('Введите текст комментария', 'error'); return; }
+  // tutor_id and child_id are required - use placeholder values if not known
+  // Parent needs to pick which tutor/child; for now use first available
+  try {
+    await post('/comments', { text, tutor_id: 1, child_id: 1 });
+    document.getElementById('comment-text').value = '';
+    toast('Комментарий отправлен!');
+    await loadParentComments();
+  } catch(e) {}
+}
+
+async function uploadSignedContract(input, contractId) {
+  if (!input.files?.length) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  try {
+    await api('POST', '/parent/contract/' + contractId + '/signed', fd, true);
+    toast('Договор загружен!');
+    await loadParentContract();
+  } catch(e) {}
+}
+
+// ============================================================
+//  CHILD PAGES
+// ============================================================
+async function loadChildSchedule() {
+  const el = document.getElementById('child-lessons-list');
+  try {
+    const ym = monthParam();
+    const year  = parseInt(ym.split('-')[0]);
+    const month = parseInt(ym.split('-')[1]);
+    const lastDay = new Date(year, month, 0).getDate();
+    const dateFrom = `${ym}-01`;
+    const dateTo   = `${ym}-${String(lastDay).padStart(2,'0')}`;
+    const lessons = await get(`/lessons/?date_from=${dateFrom}&date_to=${dateTo}`);
+    cachedLessons = lessons || [];
+    renderCalendar('child-cal-grid', 'ch-month-label');
+    if (el) el.innerHTML = renderLessonsTable(cachedLessons, false);
+  } catch(e) {
+    if (el) el.innerHTML = errBox('Не удалось загрузить расписание');
+  }
+}
+
+async function loadHomeworks() {
+  const el = document.getElementById('hw-list');
+  try {
+    const hws = await get('/homeworks');
+    if (!hws?.length) { el.innerHTML = '<div class="alert alert-info">Домашних заданий нет</div>'; return; }
+    el.innerHTML = hws.map(h => `
+      <div class="card" style="margin-bottom:10px;opacity:${h.is_done ? .7 : 1}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span class="badge ${h.is_done ? 'badge-green' : 'badge-amber'}">${h.is_done ? 'Выполнено' : 'Не выполнено'}</span>
+          <span style="font-size:12px;color:#888">${(h.created_at || '').slice(0,10)}</span>
+        </div>
+        <p style="font-size:13px;margin-bottom:10px">${h.description || ''}</p>
+        ${!h.is_done ? `<button class="btn sm success" onclick="markHWDone(${h.id})">✓ Выполнено</button>` : ''}
+      </div>`).join('');
+  } catch(e) { el.innerHTML = errBox('Ошибка загрузки домашних заданий'); }
+}
+
+async function markHWDone(id) {
+  try {
+    await patch('/homeworks/' + id + '/submit', { submission_url: 'done' });
+    toast('Отмечено как выполненное!');
+    await loadHomeworks();
+  } catch(e) {}
+}
+
+async function uploadHW(input, id) {
+  if (!input.files?.length) return;
+  try {
+    await patch('/homeworks/' + id + '/submit', { submission_url: input.files[0].name });
+    toast('Задание отмечено как выполненное!');
+    await loadHomeworks();
+  } catch(e) {}
+}
+
+// ============================================================
+//  ADD LESSON
+// ============================================================
+async function loadSubjects() {
+  try {
+    const subjs = await get('/subjects');
+    cachedSubjects = subjs || [];
+    const el = document.getElementById('ls-subj');
+    if (el) el.innerHTML = cachedSubjects.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  } catch(e) {}
+}
+
+async function openAddLessonModal() {
+  const studentSel = document.getElementById('ls-student');
+  const subjectSel = document.getElementById('ls-subj');
+  const tutorRow   = document.getElementById('ls-tutor-row');
+  const tutorSel   = document.getElementById('ls-tutor');
+  if (!studentSel || !subjectSel) return;
+
+  studentSel.innerHTML = '<option value="">Загрузка...</option>';
+  subjectSel.innerHTML = '<option value="">Загрузка...</option>';
+
+  // Для администратора показываем выбор репетитора
+  if (currentUser?.role === 'admin') {
+    tutorRow.style.display = '';
+    tutorSel.innerHTML = '<option value="">Загрузка...</option>';
+    try {
+      // /users/tutors/public возвращает TutorProfileOut: { id: tutor_profile.id, user: {...} }
+      const tutorProfiles = await get('/users/tutors/public');
+      tutorSel.innerHTML = (tutorProfiles || []).length
+        ? tutorProfiles.map(tp =>
+            `<option value="${tp.id}">${(tp.user.last_name || '')} ${(tp.user.first_name || '')}`.trim() + `</option>`
+          ).join('')
+        : '<option value="">Нет репетиторов в системе</option>';
+    } catch(e) {
+      tutorSel.innerHTML = '<option value="">Ошибка загрузки репетиторов</option>';
+    }
+  } else {
+    tutorRow.style.display = 'none';
+  }
+
+  // Загружаем учеников
+  try {
+    const students = await get('/lessons/students-list/all');
+    studentSel.innerHTML = (students || []).length
+      ? students.map(s => {
+          const name = `${s.last_name || ''} ${s.first_name || ''}`.trim() || s.email;
+          const realChildId = s.child_profile?.id || s.id;
+          return `<option value="${realChildId}">${name}</option>`;
+        }).join('')
+      : '<option value="">Нет учеников в системе</option>';
+  } catch(e) {
+    studentSel.innerHTML = '<option value="">Ошибка загрузки</option>';
+  }
+
+  // Загружаем предметы
+  try {
+    const subjects = await get('/subjects');
+    subjectSel.innerHTML = (subjects || []).length
+      ? subjects.map(s => `<option value="${s.id}">${s.name}</option>`).join('')
+      : '<option value="">Предметы не созданы</option>';
+  } catch(e) {
+    subjectSel.innerHTML = '<option value="1">Математика</option>';
+  }
+
+  // Дефолтная дата — завтра
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const dateInput = document.getElementById('ls-date');
+  if (dateInput) dateInput.value = tomorrow.toISOString().slice(0, 10);
+
+  openModal('modal-lesson');
+}
+
+async function addLesson() {
+  const studentSelect = document.getElementById('ls-student');
+  const subjectSelect = document.getElementById('ls-subj');
+  const dateInput      = document.getElementById('ls-date');
+  const timeInput      = document.getElementById('ls-time');
+  const durationInput  = document.getElementById('ls-duration');
+  const btn            = document.getElementById('btn-add-lesson');
+
+  if (!dateInput || !timeInput || !studentSelect || !subjectSelect) return;
+
+  const studentId = studentSelect.value;
+  const subjectId = subjectSelect.value;
+  const date      = dateInput.value;
+  const timeStart = timeInput.value;
+  const duration  = parseInt(durationInput?.value) || 60;
+
+  // Determine tutor profile ID
+  let tutorId = null;
+  const tutorSelect = document.getElementById('ls-tutor');
+
+  if (currentUser?.role === 'admin') {
+    // Admin picks from dropdown — value is tutor_profile.id
+    tutorId = tutorSelect?.value ? parseInt(tutorSelect.value) : null;
+    if (!tutorId) {
+      toast('Выберите репетитора из списка', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = 'Добавить'; }
+      return;
+    }
+  } else if (currentUser?.role === 'tutor') {
+    // Tutor's own profile id comes from /users/me → tutor_profile.id
+    tutorId = currentUser.tutor_profile?.id || null;
+    if (!tutorId) {
+      toast('Профиль репетитора не найден. Попробуйте выйти и войти заново.', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = 'Добавить'; }
+      return;
+    }
+  } else {
+    toast('Только репетитор или администратор может создавать занятия', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = 'Добавить'; }
+    return;
+  }
+
+  if (!date || !timeStart) {
+    alert('Укажите дату и время начала занятия');
+    return;
+  }
+  if (!studentId) {
+    alert('Пожалуйста, выберите ученика');
+    return;
+  }
+
+  // Расчет времени окончания занятия
+  let timeEnd = "";
+  try {
+    const [hours, minutes] = timeStart.split(':').map(Number);
+    const endDate = new Date();
+    endDate.setHours(hours, minutes + duration, 0);
+
+    const endH = String(endDate.getHours()).padStart(2, '0');
+    const endM = String(endDate.getMinutes()).padStart(2, '0');
+    timeEnd = `${endH}:${endM}:00`;
+  } catch (err) {
+    console.error("Ошибка расчета времени окончания:", err);
+    timeEnd = timeStart + ":00";
+  }
+
+  const formattedTimeStart = timeStart.split(':').length === 2 ? timeStart + ':00' : timeStart;
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+  }
+
+  const payload = {
+    tutor_id:      parseInt(tutorId), // Сюда улетит реальный ID профиля (например, 1)
+    child_id:      parseInt(studentId),
+    subject_id:    parseInt(subjectId),
+    date:          date,
+    time_start:    formattedTimeStart,
+    time_end:      timeEnd,
+    is_free_trial: false,
+    notes:         ""
+  };
+
+  console.log("[Отправка урока] Финальный payload:", payload);
+
+  try {
+    await post('/lessons/', payload);
+    closeModal('modal-lesson');
+    toast('✓ Занятие успешно добавлено!');
+
+    if (currentUser?.role === 'tutor') await loadTutorSchedule();
+    if (currentUser?.role === 'admin') await loadAdminLessons();
+  } catch(e) {
+    console.error("Бэкенд отклонил запрос:", e);
+    toast('❌ ' + (e.message || 'Не удалось сохранить занятие'), 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = 'Добавить';
+    }
+  }
+}
+
+// ============================================================
+//  LESSON DETAIL MODAL
+// ============================================================
+function showLessonDetail(id) {
+  const l = cachedLessons.find(x => x.id === id);
+  if (!l) return;
+  const subjTitle = l.subject_name || `Предмет #${l.subject_id}`;
+  const dateTitle = (l.date || '').slice(0, 10);
+  document.getElementById('detail-title').innerHTML =
+    `${subjTitle} · ${dateTitle} <button class="btn sm" onclick="closeModal('modal-lesson-detail')">✕</button>`;
+
+  let body = `
+    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <span class="badge ${statusBadge(l.status)}">${statusLabel(l.status)}</span>
+    </div>
+    <div style="font-size:13px;color:#888;margin-bottom:16px">
+      Ученик: <strong>${l.student_name || '—'}</strong> · Репетитор: <strong>${l.tutor_name || '—'}</strong><br>
+      Время: ${(l.time_start || '').slice(0,5)}–${(l.time_end || '').slice(0,5)}
+    </div>`;
+
+  // Tutor can change status
+  if (currentUser?.role === 'tutor' || currentUser?.role === 'admin') {
+    body += `
+    <div class="form-row">
+      <label>Изменить статус</label>
+      <select id="lesson-status-sel" class="form-control" style="display: block; width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; color: #000;">
+        <option value="scheduled" ${l.status==='scheduled'?'selected':''}>Предстоит</option>
+        <option value="completed" ${l.status==='completed' || l.status==='done'?'selected':''}>Проведено</option>
+        <option value="cancelled" ${l.status==='cancelled'?'selected':''}>Отменено</option>
+      </select>
+    </div>
+    <button class="btn primary sm" onclick="updateLessonStatus(${l.id})">Сохранить статус</button>`;
+  }
+
+  // Homework upload for tutor
+  if (currentUser?.role === 'tutor') {
+    body += `<div style="margin-top:16px;border-top:1px solid #eee;padding-top:16px">
+      <h3>Домашнее задание</h3>
+      <div class="form-row"><textarea id="hw-text" placeholder="Текст задания..." rows="3"></textarea></div>
+      <button class="btn sm primary" onclick="addHomework(${l.id})">Добавить ДЗ</button>
+    </div>`;
+  }
+
+  document.getElementById('detail-body').innerHTML = body;
+  openModal('modal-lesson-detail');
+}
+
+async function updateLessonStatus(lessonId) {
+  const statusSel = document.getElementById('lesson-status-sel');
+  if (!statusSel) return;
+
+  const newStatus = statusSel.value;
+
+  try {
+    // Отправляем PATCH запрос строго с полем status
+    await patch(`/lessons/${lessonId}`, {
+      status: newStatus
+    });
+
+    closeModal('modal-lesson-detail');
+
+    if (typeof toast === 'function') toast('Статус занятия обновлен');
+    else alert('Статус занятия обновлен!');
+
+    // Перезагружаем списки, чтобы обновились цвета баджей на экране
+    if (currentUser?.role === 'tutor') await loadTutorSchedule();
+    if (currentUser?.role === 'admin') await loadAdminLessons();
+
+  } catch (e) {
+    console.error("Ошибка обновления статуса:", e);
+    alert("Бэкенд отклонил статус. Проверь консоль браузера.");
+  }
+}
+
+async function addHomework(lessonId) {
+  const text = document.getElementById('hw-text').value.trim();
+  if (!text) { toast('Введите текст задания', 'error'); return; }
+  const l = cachedLessons.find(x => x.id === lessonId);
+  if (!l) { toast('Занятие не найдено', 'error'); return; }
+  try {
+    await post('/homeworks', {
+      lesson_id:   lessonId,
+      child_id:    l.child_id,
+      description: text,
+    });
+    toast('Домашнее задание добавлено!');
+    closeModal('modal-lesson-detail');
+  } catch(e) {}
+}
+
+// ============================================================
+//  REPORTS
+// ============================================================
+async function openReportModal() {
+  const sel = document.getElementById('rp-student');
+  try {
+    const students = await get('/lessons/tutor/my-students');
+    sel.innerHTML = (students || []).map(s =>
+      `<option value="${s.child_profile_id}">${s.last_name || ''} ${s.first_name || ''}</option>`
+    ).join('') || '<option value="">Нет учеников</option>';
+  } catch(e) {
+    sel.innerHTML = '<option value="">Ошибка загрузки</option>';
+  }
+  openModal('modal-report');
+}
+
+async function submitReport() {
+  const childId   = parseInt(document.getElementById('rp-student').value);
+  const lessons   = parseInt(document.getElementById('rp-lessons').value) || 5;
+  const content   = document.getElementById('rp-content').value.trim();
+  if (!content) { toast('Введите текст отчёта', 'error'); return; }
+  try {
+    await post('/reports', {
+      child_id:     childId,
+      subject_id:   1,  // default subject; could be made selectable
+      lesson_count: lessons,
+      content,
+    });
+    toast('Отчёт сохранён!');
+    closeModal('modal-report');
+    await loadTutorFinance();
+  } catch(e) {}
+}
+
+// ============================================================
+//  ACT UPLOAD / DOWNLOAD
+// ============================================================
+async function downloadAct() {
+  window.open(API + '/tutor/act/blank', '_blank');
+}
+
+async function uploadAct(input) {
+  if (!input.files?.length) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  try {
+    await api('POST', '/tutor/acts', fd, true);
+    toast('Акт загружен! Ожидайте проверки.');
+    await loadTutorFinance();
+  } catch(e) {}
+}
+
+async function downloadContract(id) {
+  window.open(API + '/tutor/contract/' + id + '/file', '_blank');
+}
+
+async function downloadParentContract(id) {
+  window.open(API + '/parent/contract/' + id + '/file', '_blank');
+}
+
+// ============================================================
+//  RENDER HELPERS
+// ============================================================
+function renderLessonsTable(lessons, showTutorStudent = false) {
+  if (!lessons?.length) return '<div style="color:#888;font-size:13px;padding:8px 0">Занятий нет</div>';
+
+  return `<table>
+    <thead><tr>
+      <th>Дата</th><th>Время</th>
+      ${showTutorStudent ? '<th>Ученик</th><th>Репетитор</th>' : ''}
+      <th>Предмет</th><th>Статус</th>
+    </tr></thead>
+    <tbody>${lessons.map(l => {
+      // Names come directly from backend (populated via joinedload)
+      const studentName = l.student_name || `Ученик #${l.child_id}`;
+      const tutorName   = l.tutor_name   || `Репетитор #${l.tutor_id}`;
+      const subjName    = l.subject_name || `Предмет #${l.subject_id}`;
+      const dateStr     = (l.date || '').slice(0, 10);
+      const timeStr     = (l.time_start || '').slice(0, 5);
+
+      return `
+      <tr style="cursor:pointer" onclick="showLessonDetail(${l.id})">
+        <td>${dateStr}</td>
+        <td>${timeStr}</td>
+        ${showTutorStudent ? `<td>${studentName}</td><td>${tutorName}</td>` : ''}
+        <td>${subjName}</td>
+        <td><span class="badge ${statusBadge(l.status)}">${statusLabel(l.status)}</span></td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderLessonsList(elId, lessons, role) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = renderLessonsTable(lessons, role === 'admin');
+}
+
+function reportCard(r) {
+  return `<div class="card" style="margin-bottom:10px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <span class="badge badge-purple">Отчёт за ${r.lessons_count || r.lessons} занятий</span>
+      <span style="font-size:12px;color:#888">${(r.created_at || r.date || '').slice(0,10)} · ${r.student_name || r.student || ''}</span>
+    </div>
+    <p style="font-size:13px;color:#555">${r.content}</p>
+  </div>`;
+}
+
+async function showStudentReports(studentId) {
+  try {
+    const reports = await get('/admin/students/' + studentId + '/reports');
+    openInfoModal('Отчёты', reports?.length
+      ? reports.map(r => reportCard(r)).join('')
+      : '<div class="alert alert-info">Отчётов нет</div>');
+  } catch(e) {}
+}
+
+async function showStudentPayments(studentId) {
+  try {
+    const data = await get('/admin/students/' + studentId + '/payments');
+    openInfoModal('Оплаты', data?.payments?.length
+      ? `<table><thead><tr><th>Дата</th><th>Сумма</th><th>Метод</th><th>Статус</th></tr></thead><tbody>
+          ${data.payments.map(p => `<tr>
+            <td>${(p.payment_date||'').slice(0,10)}</td>
+            <td>${p.amount} BYN</td>
+            <td>${p.method||'—'}</td>
+            <td><span class="badge ${p.status==='confirmed'?'badge-green':'badge-amber'}">${p.status==='confirmed'?'Подтверждено':'Ожидает'}</span></td>
+          </tr>`).join('')}
+        </tbody></table>`
+      : '<div class="alert alert-info">Платежей нет</div>');
+  } catch(e) {}
+}
+
+async function showStudentContract(studentId) {
+  openInfoModal('Договор', '<div style="color:#888;font-size:13px">Для управления договорами используйте раздел администратора</div>');
+}
+
+async function showTutorDetails(tutorId) {
+  try {
+    const data = await get('/admin/tutors/' + tutorId + '/stats');
+    openInfoModal('Детали репетитора', `
+      <div class="grid2">
+        <div class="stat-card"><div class="stat-num">${data?.lessons_done||0}</div><div class="stat-label">Занятий</div></div>
+        <div class="stat-card"><div class="stat-num">${data?.students_count||0}</div><div class="stat-label">Учеников</div></div>
+      </div>`);
+  } catch(e) {}
+}
+
+async function showTutorTests(tutorId) {
+  openInfoModal('Тесты репетитора', '<div class="alert alert-info">Раздел тестов в разработке</div>');
+}
+
+async function showTutorContract(tutorId) {
+  try {
+    const c = await get('/admin/tutors/' + tutorId + '/contract');
+    openInfoModal('Договор подряда', c
+      ? `<div style="display:flex;justify-content:space-between;align-items:center">
+          <div><div style="font-weight:500">Договор №${c.contract_number||'—'}</div>
+          <div style="font-size:12px;color:#888">${(c.start_date||'').slice(0,10)}</div></div>
+          <button class="btn sm" onclick="window.open('${API}/admin/tutors/${tutorId}/contract/file','_blank')">↓ Скачать</button>
+        </div>`
+      : '<div style="color:#888">Договор не загружен</div>');
+  } catch(e) {}
+}
+
+async function showStudentMaterials(studentId) {
+  openInfoModal('Материалы', '<div class="alert alert-info">Раздел материалов в разработке</div>');
+}
+
+// Generic info modal reuse
+function openInfoModal(title, html) {
+  document.getElementById('detail-title').innerHTML =
+    `${title} <button class="btn sm" onclick="closeModal('modal-lesson-detail')">✕</button>`;
+  document.getElementById('detail-body').innerHTML = html;
+  openModal('modal-lesson-detail');
+}
+
+// ============================================================
+//  MODAL HELPERS
+// ============================================================
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// ============================================================
+//  TOAST
+// ============================================================
+let toastTimer;
+function toast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.background = type === 'error' ? '#A32D2D' : '#3C3489';
+  el.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.style.display = 'none', 3500);
+}
+
+// ============================================================
+//  UTILS
+// ============================================================
+function monthParam() {
+  return currentMonth.getFullYear() + '-' + String(currentMonth.getMonth() + 1).padStart(2, '0');
+}
+
+function err(msg) { return `<div class="alert alert-error">${msg}</div>`; }
+function errBox(msg) { return `<div class="alert alert-error">${msg}</div>`; }
+
+function statusLabel(status) {
+  if (status === 'scheduled') return 'Предстоит';
+  if (status === 'completed' || status === 'done') return 'Проведено';
+  if (status === 'cancelled') return 'Отменено';
+  return status;
+}
+
+function statusBadge(status) {
+  if (status === 'scheduled') return 'badge-blue';
+  if (status === 'completed' || status === 'done') return 'badge-green'; // Зеленый для проведенного
+  if (status === 'cancelled') return 'badge-red';
+  return 'badge-gray';
+}
+function roleLabel(r) {
+  return { admin: 'Администратор', tutor: 'Репетитор', parent: 'Родитель', child: 'Ученик' }[r] || r;
+}
+function roleBadge(r) {
+  return { admin: 'badge-red', tutor: 'badge-purple', parent: 'badge-blue', child: 'badge-green' }[r] || 'badge-gray';
+}
+
+// ============================================================
+//  BOOT
+// ============================================================
+document.addEventListener('DOMContentLoaded', () => {
+  tryAutoLogin();
+});
+</script>
+</body>
+</html>
