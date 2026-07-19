@@ -12,7 +12,7 @@ from pydantic import BaseModel  # 🌟 Добавили для Pydantic схем
 from app.db.session import get_db
 from app.core.deps import require_admin
 from app.models.models import (
-    InviteCode, RoleEnum, Lesson, LessonStatus,
+    InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
     TutorProfile, TutorSubject, Subject, TutorDocument, Act,
     Homework, Report, Material, ParentContract, Payment, Comment, TestResult,
@@ -428,6 +428,14 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
     receipts = await db.execute(select(EmailReceipt).where(EmailReceipt.child_id == child_id))
     for receipt in receipts.scalars().all():
         receipt.child_id = None
+
+    invite_codes = await db.execute(select(InviteCode).where(InviteCode.used_by_user_id == user_id))
+    for invite in invite_codes.scalars().all():
+        invite.used_by_user_id = None
+
+    notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
+    for notification in notifications.scalars().all():
+        await db.delete(notification)
 
     await db.delete(child)
     await db.delete(user)
