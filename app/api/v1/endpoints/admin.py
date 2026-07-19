@@ -42,6 +42,34 @@ def generate_random_code(prefix: str) -> str:
     return f"PIF-{prefix.upper()}-{secrets.token_hex(3).upper()}"
 
 
+async def _delete_invite_codes_for_user(db: AsyncSession, user_id: int) -> int:
+    result = await db.execute(select(InviteCode).where(InviteCode.used_by_user_id == user_id))
+    direct_codes = result.scalars().all()
+    code_ids = {code.id for code in direct_codes}
+    code_ids.update(code.linked_code_id for code in direct_codes if code.linked_code_id)
+
+    if not code_ids:
+        return 0
+
+    related = await db.execute(
+        select(InviteCode).where(
+            (InviteCode.id.in_(code_ids)) | (InviteCode.linked_code_id.in_(code_ids))
+        )
+    )
+    codes = related.scalars().all()
+    if not codes:
+        return 0
+
+    for code in codes:
+        code.linked_code_id = None
+    await db.flush()
+
+    for code in codes:
+        await db.delete(code)
+
+    return len(codes)
+
+
 @router.post("/invite-codes", response_model=List[InviteCodeResponse])
 async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depends(get_db)):
     role_str = str(payload.role).strip().lower()
@@ -77,6 +105,22 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
 async def list_invite_codes(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(InviteCode).order_by(InviteCode.created_at.desc()))
     return result.scalars().all()
+
+
+@router.delete("/invite-codes", dependencies=[Depends(require_admin)])
+async def clear_invite_codes(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(InviteCode))
+    codes = result.scalars().all()
+
+    for code in codes:
+        code.linked_code_id = None
+    await db.flush()
+
+    for code in codes:
+        await db.delete(code)
+
+    await db.commit()
+    return {"deleted": len(codes)}
 
 
 # ─── Email Receipts ────────────────────────────────────────────────────────────
@@ -364,6 +408,7 @@ async def update_admin_tutor(
 async def delete_admin_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TutorProfile).where(TutorProfile.id == tutor_id))
     tutor = result.scalar_one_or_none()
+    user_id = tutor.user_id if tutor else None
     if not tutor:
         raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
 
@@ -380,7 +425,26 @@ async def delete_admin_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
     for doc in docs.scalars().all():
         await db.delete(doc)
 
+    for model, field in (
+        (TutorContract, TutorContract.tutor_id),
+        (Report, Report.tutor_id),
+        (Comment, Comment.tutor_id),
+        (Act, Act.tutor_id),
+    ):
+        rows = await db.execute(select(model).where(field == tutor_id))
+        for row in rows.scalars().all():
+            await db.delete(row)
+
+    if user_id:
+        await _delete_invite_codes_for_user(db, user_id)
+        notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
+        for notification in notifications.scalars().all():
+            await db.delete(notification)
+
+    user = await db.get(User, user_id) if user_id else None
     await db.delete(tutor)
+    if user:
+        await db.delete(user)
     await db.commit()
     return None
 
@@ -395,6 +459,10 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
     result = await db.execute(select(ChildProfile).where(ChildProfile.user_id == user_id))
     child = result.scalar_one_or_none()
     if not child:
+        await _delete_invite_codes_for_user(db, user_id)
+        notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
+        for notification in notifications.scalars().all():
+            await db.delete(notification)
         await db.delete(user)
         await db.commit()
         return None
@@ -429,9 +497,7 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
     for receipt in receipts.scalars().all():
         receipt.child_id = None
 
-    invite_codes = await db.execute(select(InviteCode).where(InviteCode.used_by_user_id == user_id))
-    for invite in invite_codes.scalars().all():
-        invite.used_by_user_id = None
+    await _delete_invite_codes_for_user(db, user_id)
 
     notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
     for notification in notifications.scalars().all():
