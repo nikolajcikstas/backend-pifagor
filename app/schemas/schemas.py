@@ -518,6 +518,7 @@ class TutorContractOut(BaseModel):
     id: int
     tutor_id: int
     file_url: str
+    signed_file_url: Optional[str] = None
     signed_at: Optional[datetime] = None
     created_at: datetime
 

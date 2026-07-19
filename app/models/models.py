@@ -250,6 +250,7 @@ class TutorContract(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    signed_file_url: Mapped[Optional[str]] = mapped_column(String(500))
     signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

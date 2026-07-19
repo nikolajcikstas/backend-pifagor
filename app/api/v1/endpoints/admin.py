@@ -36,6 +36,16 @@ class BaseParentChildLink(BaseModel):
 
 class AdminStudentUpdate(BaseModel):
     lesson_price: Optional[float] = None
+    grade: Optional[int] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class TutorWorkDocumentCreate(BaseModel):
+    kind: str
+    title: str
+    file_url: str
 
 
 def generate_random_code(prefix: str) -> str:
@@ -260,9 +270,134 @@ async def update_admin_student(
         if payload.lesson_price <= 0:
             raise HTTPException(status_code=400, detail="Lesson price must be greater than zero")
         student.child_profile.lesson_price = payload.lesson_price
+    if payload.grade is not None:
+        student.child_profile.grade = payload.grade
+    if payload.first_name is not None:
+        student.first_name = payload.first_name.strip()
+    if payload.last_name is not None:
+        student.last_name = payload.last_name.strip()
+    if payload.phone is not None:
+        student.phone = payload.phone.strip() or None
 
     await db.commit()
-    return {"ok": True, "lesson_price": student.child_profile.lesson_price}
+    return {
+        "ok": True,
+        "lesson_price": student.child_profile.lesson_price,
+        "grade": student.child_profile.grade,
+        "first_name": student.first_name,
+        "last_name": student.last_name,
+        "phone": student.phone,
+    }
+
+
+@router.get("/students-dashboard", dependencies=[Depends(require_admin)])
+async def students_dashboard(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ChildProfile)
+        .options(
+            joinedload(ChildProfile.user),
+            joinedload(ChildProfile.parents).joinedload(ParentChild.parent).joinedload(ParentProfile.user),
+            joinedload(ChildProfile.lessons).joinedload(Lesson.subject),
+            joinedload(ChildProfile.lessons).joinedload(Lesson.tutor).joinedload(TutorProfile.user),
+            joinedload(ChildProfile.lessons).joinedload(Lesson.tutor),
+        )
+    )
+    children = result.scalars().unique().all()
+    rows = []
+    for child in children:
+        user = child.user
+        if not user:
+            continue
+        parents = [link.parent.user for link in child.parents if link.parent and link.parent.user]
+        subjects = sorted({lesson.subject.name for lesson in child.lessons if lesson.subject})
+        tutors = sorted({
+            f"{lesson.tutor.user.last_name} {lesson.tutor.user.first_name}".strip()
+            for lesson in child.lessons
+            if lesson.tutor and lesson.tutor.user
+        })
+        contract_count_res = await db.execute(
+            select(func.count(ParentContract.id)).where(ParentContract.child_id == child.id)
+        )
+        rows.append({
+            "child_id": child.id,
+            "user_id": user.id,
+            "status": "Клиент" if user.is_active else "Не занимаются",
+            "lesson_price": child.lesson_price,
+            "student_name": f"{user.last_name} {user.first_name}".strip(),
+            "grade": child.grade,
+            "lessons_per_week": None,
+            "subjects": subjects,
+            "tutors": tutors,
+            "has_contract": (contract_count_res.scalar() or 0) > 0,
+            "notes": "",
+            "student_phone": user.phone,
+            "parent_names": [f"{p.last_name} {p.first_name}".strip() for p in parents],
+            "parent_phones": [p.phone for p in parents if p.phone],
+            "channel": "",
+        })
+    return rows
+
+
+@router.get("/contracts-dashboard", dependencies=[Depends(require_admin)])
+async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
+    parent_result = await db.execute(
+        select(ParentContract).options(
+            joinedload(ParentContract.parent).joinedload(ParentProfile.user),
+            joinedload(ParentContract.child).joinedload(ChildProfile.user),
+        )
+    )
+    tutor_result = await db.execute(
+        select(TutorContract).options(
+            joinedload(TutorContract.tutor).joinedload(TutorProfile.user),
+        )
+    )
+    rows = []
+    for contract in parent_result.scalars().unique().all():
+        parent_user = contract.parent.user if contract.parent else None
+        child_user = contract.child.user if contract.child else None
+        rows.append({
+            "id": f"parent-{contract.id}",
+            "number": f"P-{contract.id:04d}",
+            "type": "Родитель",
+            "status": "Действующий" if contract.is_signed else "Ожидает подписи",
+            "start_date": contract.created_at.date().isoformat() if contract.created_at else None,
+            "end_date": None,
+            "parent_full_name": f"{parent_user.last_name} {parent_user.first_name}".strip() if parent_user else "",
+            "parent_phone": parent_user.phone if parent_user else "",
+            "city": "",
+            "street": "",
+            "house": "",
+            "flat": "",
+            "index": "",
+            "email": parent_user.email if parent_user else "",
+            "letter": False,
+            "student_name": f"{child_user.last_name} {child_user.first_name}".strip() if child_user else "",
+            "total_amount": None,
+            "file_url": contract.signed_file_url or contract.file_url,
+        })
+    for contract in tutor_result.scalars().unique().all():
+        tutor_user = contract.tutor.user if contract.tutor else None
+        rows.append({
+            "id": f"tutor-{contract.id}",
+            "number": f"T-{contract.id:04d}",
+            "type": "Репетитор",
+            "status": "Действующий" if contract.signed_file_url or contract.signed_at else "Ожидает подписи",
+            "start_date": contract.created_at.date().isoformat() if contract.created_at else None,
+            "end_date": None,
+            "parent_full_name": "",
+            "parent_phone": "",
+            "city": "",
+            "street": "",
+            "house": "",
+            "flat": "",
+            "index": "",
+            "email": tutor_user.email if tutor_user else "",
+            "letter": False,
+            "student_name": f"{tutor_user.last_name} {tutor_user.first_name}".strip() if tutor_user else "",
+            "total_amount": None,
+            "file_url": contract.signed_file_url or contract.file_url,
+        })
+    return rows
 
 
 # ─── Ручная привязка Родитель ↔ Ребёнок ────────────────────────────────────────
@@ -528,6 +663,44 @@ async def send_tutor_document(payload: TutorDocumentCreate, db: AsyncSession = D
     await db.commit()
     await db.refresh(doc)
     return doc
+
+
+@router.post("/tutors/{tutor_id}/work-documents", dependencies=[Depends(require_admin)])
+async def send_tutor_work_document(
+    tutor_id: int,
+    payload: TutorWorkDocumentCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Админ отправляет репетитору контракт, акт или обычный документ."""
+    tutor_res = await db.execute(select(TutorProfile).where(TutorProfile.id == tutor_id))
+    if not tutor_res.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
+
+    kind = payload.kind.strip().lower()
+    if kind in {"contract", "контракт", "договор", "договор подряда"}:
+        item = TutorContract(tutor_id=tutor_id, file_url=payload.file_url)
+        db.add(item)
+        stored_kind = "contract"
+    elif kind in {"act", "акт"}:
+        today = date.today()
+        item = Act(
+            tutor_id=tutor_id,
+            period_start=today.replace(day=1),
+            period_end=today,
+            lessons_count=0,
+            total_amount=0,
+            blank_url=payload.file_url,
+        )
+        db.add(item)
+        stored_kind = "act"
+    else:
+        item = TutorDocument(tutor_id=tutor_id, title=payload.title, file_url=payload.file_url)
+        db.add(item)
+        stored_kind = "document"
+
+    await db.commit()
+    await db.refresh(item)
+    return {"ok": True, "kind": stored_kind, "id": item.id}
 
 
 @router.get(

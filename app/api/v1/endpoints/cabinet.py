@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Body, Response
@@ -498,6 +498,63 @@ async def list_tutor_contracts(
         q = q.where(TutorContract.tutor_id == current_user.tutor_profile.id)
     result = await db.execute(q)
     return result.scalars().all()
+
+
+@router.post("/tutor/contract/{contract_id}/signed")
+async def upload_tutor_signed_contract(
+    contract_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_tutor),
+):
+    result = await db.execute(select(TutorContract).where(TutorContract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    if not current_user.tutor_profile or contract.tutor_id != current_user.tutor_profile.id:
+        raise HTTPException(status_code=403, detail="This contract belongs to another tutor")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".pdf", ".jpg", ".jpeg", ".png"}:
+        raise HTTPException(status_code=400, detail="Allowed files: PDF, JPG, PNG")
+
+    contents = await file.read()
+    upload_dir = Path(__file__).resolve().parents[3] / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    (upload_dir / stored_name).write_bytes(contents)
+    file_url = f"/uploads/{stored_name}"
+
+    contract.signed_file_url = file_url
+    contract.signed_at = datetime.utcnow()
+    await db.commit()
+    return {"ok": True, "file_url": file_url}
+
+
+@router.get("/tutor/contract/{contract_id}/file")
+async def download_tutor_contract(
+    contract_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(TutorContract).where(TutorContract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    if current_user.role == RoleEnum.tutor:
+        if not current_user.tutor_profile or contract.tutor_id != current_user.tutor_profile.id:
+            raise HTTPException(status_code=403, detail="This contract belongs to another tutor")
+    elif current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Only tutor or admin can download this contract")
+
+    file_url = contract.signed_file_url or contract.file_url
+    if not file_url:
+        raise HTTPException(status_code=404, detail="Contract file not found")
+    if file_url.startswith("/uploads/"):
+        file_path = Path(__file__).resolve().parents[3] / file_url.lstrip("/")
+        if file_path.exists():
+            return FileResponse(file_path, media_type="application/pdf", filename=file_path.name)
+    return RedirectResponse(file_url)
 
 
 # ─── GET Comments (for parent) ────────────────────────────────────────────────
