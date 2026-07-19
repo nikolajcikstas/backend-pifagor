@@ -15,7 +15,7 @@ from app.models.models import (
     InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
     TutorProfile, TutorSubject, Subject, TutorDocument, TutorContract, Act,
-    Homework, Report, Material, ParentContract, Payment, Comment, TestResult,
+    Homework, Report, Material, ParentContract, Payment, Comment, TestResult, Review,
 )
 from app.schemas.schemas import (
     InviteCodeCreate, InviteCodeResponse,
@@ -547,9 +547,12 @@ async def delete_admin_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
     if not tutor:
         raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
 
-    lessons_res = await db.execute(select(Lesson.id).where(Lesson.tutor_id == tutor_id).limit(1))
-    if lessons_res.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Репетиторов с историей занятий удалить нельзя")
+    lessons = await db.execute(select(Lesson).where(Lesson.tutor_id == tutor_id))
+    for lesson in lessons.scalars().all():
+        hws = await db.execute(select(Homework).where(Homework.lesson_id == lesson.id))
+        for hw in hws.scalars().all():
+            await db.delete(hw)
+        await db.delete(lesson)
 
     # Удаляем зависимые записи, чтобы не упереться в внешние ключи
     subj_links = await db.execute(select(TutorSubject).where(TutorSubject.tutor_id == tutor_id))
@@ -565,6 +568,7 @@ async def delete_admin_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
         (Report, Report.tutor_id),
         (Comment, Comment.tutor_id),
         (Act, Act.tutor_id),
+        (Review, Review.tutor_id),
     ):
         rows = await db.execute(select(model).where(field == tutor_id))
         for row in rows.scalars().all():

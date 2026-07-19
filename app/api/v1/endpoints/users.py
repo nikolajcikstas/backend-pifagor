@@ -49,20 +49,16 @@ async def list_users(
 async def list_published_tutors_compat(db: AsyncSession = Depends(get_db)):
     users_res = await db.execute(
         select(User)
-        .where(User.role == RoleEnum.tutor)
+        .where(User.role == RoleEnum.tutor, User.is_active == True)
         .options(selectinload(User.tutor_profile))
     )
     tutor_users = users_res.scalars().unique().all()
 
     output = []
-    created = False
     for u in tutor_users:
         profile = u.tutor_profile
         if profile is None:
-            profile = TutorProfile(user_id=u.id)
-            db.add(profile)
-            await db.flush()
-            created = True
+            continue
 
         output.append({
             "id": profile.id,
@@ -81,14 +77,12 @@ async def list_published_tutors_compat(db: AsyncSession = Depends(get_db)):
             "subjects": [],
         })
 
-    if created:
-        await db.commit()
     return output
 
 
 @router.get("/students/list", response_model=list[dict])
 async def list_students_for_tutor_compat(db: AsyncSession = Depends(get_db)):
-    query = select(User).where(User.role == RoleEnum.child).options(selectinload(User.child_profile))
+    query = select(User).where(User.role == RoleEnum.child, User.is_active == True).options(selectinload(User.child_profile))
     result = await db.execute(query)
     students = result.scalars().all()
 
@@ -123,13 +117,12 @@ async def get_user(
 
 @router.get("/tutors/public", response_model=list[dict])
 async def list_published_tutors(db: AsyncSession = Depends(get_db)):
-    """All tutors (with auto-create of missing profiles) — used in admin dropdowns."""
+    """Active tutors with existing profiles — used in admin dropdowns."""
     from sqlalchemy.orm import joinedload as _jl
 
-    # Load all users with role=tutor
     users_res = await db.execute(
         select(User)
-        .where(User.role == RoleEnum.tutor)
+        .where(User.role == RoleEnum.tutor, User.is_active == True)
         .options(_jl(User.tutor_profile))
     )
     tutor_users = users_res.scalars().unique().all()
@@ -138,10 +131,7 @@ async def list_published_tutors(db: AsyncSession = Depends(get_db)):
     for u in tutor_users:
         profile = u.tutor_profile
         if profile is None:
-            # Auto-create missing TutorProfile
-            profile = TutorProfile(user_id=u.id)
-            db.add(profile)
-            await db.flush()
+            continue
 
         output.append({
             "id": profile.id,           # tutor_profile.id  — used as tutor_id in lessons
@@ -154,9 +144,6 @@ async def list_published_tutors(db: AsyncSession = Depends(get_db)):
             "rate_per_hour": profile.rate_per_hour,
             "is_published": profile.is_published,
         })
-
-    if any(u.tutor_profile is None for u in tutor_users):
-        await db.commit()
 
     return output
 

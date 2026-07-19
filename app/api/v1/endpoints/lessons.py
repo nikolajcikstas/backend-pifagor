@@ -212,7 +212,7 @@ async def list_students_for_tutor_compat(db: AsyncSession = Depends(get_db)):
     try:
         query = (
             select(User)
-            .where(User.role == RoleEnum.child)
+            .where(User.role == RoleEnum.child, User.is_active == True)
             .options(joinedload(User.child_profile))
         )
         result = await db.execute(query)
@@ -222,9 +222,7 @@ async def list_students_for_tutor_compat(db: AsyncSession = Depends(get_db)):
         for s in students:
             cp = s.child_profile
             if cp is None:
-                cp = ChildProfile(user_id=s.id)
-                db.add(cp)
-                await db.flush()
+                continue
 
             output.append({
                 "id": s.id,
@@ -234,8 +232,6 @@ async def list_students_for_tutor_compat(db: AsyncSession = Depends(get_db)):
                 "child_profile": {"id": cp.id},
             })
 
-        if output:
-            await db.commit()
         return output
     except Exception as e:
         await db.rollback()
@@ -363,7 +359,7 @@ async def list_students_for_tutor_fixed(db: AsyncSession = Depends(get_db)):
     try:
         query = (
             select(User)
-            .where(User.role == "child")
+            .where(User.role == RoleEnum.child, User.is_active == True)
             .options(joinedload(User.child_profile))
         )
         result = await db.execute(query)
@@ -373,10 +369,7 @@ async def list_students_for_tutor_fixed(db: AsyncSession = Depends(get_db)):
         for s in students:
             cp = s.child_profile
             if cp is None:
-                from app.models.models import ChildProfile as _CP
-                cp = _CP(user_id=s.id)
-                db.add(cp)
-                await db.flush()
+                continue
 
             output.append({
                 "id": s.id,
@@ -386,8 +379,6 @@ async def list_students_for_tutor_fixed(db: AsyncSession = Depends(get_db)):
                 "child_profile": {"id": cp.id}
             })
 
-        if output:
-            await db.commit()
         return output
     except Exception as e:
         await db.rollback()
