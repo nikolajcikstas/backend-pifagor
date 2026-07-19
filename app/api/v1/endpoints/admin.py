@@ -14,7 +14,7 @@ from app.core.deps import require_admin
 from app.models.models import (
     InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
-    TutorProfile, TutorSubject, Subject, TutorDocument, Act,
+    TutorProfile, TutorSubject, Subject, TutorDocument, TutorContract, Act,
     Homework, Report, Material, ParentContract, Payment, Comment, TestResult,
 )
 from app.schemas.schemas import (
