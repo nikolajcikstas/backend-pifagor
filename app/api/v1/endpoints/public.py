@@ -17,11 +17,38 @@ from app.services.email_notification import send_lead_notification
 
 router = APIRouter(tags=["public"])
 
+REQUIRED_SUBJECTS = (
+    ("Математика", "matematika"),
+    ("Физика", "fizika"),
+    ("Английский язык", "angliyskiy"),
+    ("Биология", "biologiya"),
+    ("Химия", "himiya"),
+)
+
+
+async def ensure_required_subjects(db: AsyncSession):
+    result = await db.execute(select(Subject))
+    existing = {subject.slug: subject for subject in result.scalars().all()}
+    changed = False
+    for name, slug in REQUIRED_SUBJECTS:
+        subject = existing.get(slug)
+        if subject:
+            if subject.name != name or not subject.is_active:
+                subject.name = name
+                subject.is_active = True
+                changed = True
+        else:
+            db.add(Subject(name=name, slug=slug, is_active=True))
+            changed = True
+    if changed:
+        await db.commit()
+
 
 # ─── Subjects ─────────────────────────────────────────────────────────────────
 
 @router.get("/subjects", response_model=List[SubjectOut])
 async def list_subjects(db: AsyncSession = Depends(get_db)):
+    await ensure_required_subjects(db)
     result = await db.execute(select(Subject).where(Subject.is_active == True))
     return result.scalars().all()
 
