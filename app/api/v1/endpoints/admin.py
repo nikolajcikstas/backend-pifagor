@@ -44,6 +44,11 @@ class AdminStudentUpdate(BaseModel):
     lessons_per_week: Optional[int] = None
     notes: Optional[str] = None
     channel: Optional[str] = None
+    parent_name: Optional[str] = None
+    parent_phone: Optional[str] = None
+    subjects: Optional[List[str]] = None
+    tutors: Optional[List[str]] = None
+    contract_label: Optional[str] = None
 
 
 class TutorWorkDocumentCreate(BaseModel):
@@ -263,7 +268,12 @@ async def update_admin_student(
 ):
     result = await db.execute(
         select(User)
-        .options(joinedload(User.child_profile))
+        .options(
+            joinedload(User.child_profile)
+            .joinedload(ChildProfile.parents)
+            .joinedload(ParentChild.parent)
+            .joinedload(ParentProfile.user)
+        )
         .where(User.id == user_id, User.role == RoleEnum.child)
     )
     student = result.scalars().unique().one_or_none()
@@ -290,6 +300,25 @@ async def update_admin_student(
         student.child_profile.notes = payload.notes.strip() or None
     if payload.channel is not None:
         student.child_profile.channel = payload.channel.strip() or None
+    if payload.subjects is not None:
+        student.child_profile.subjects_text = ", ".join(s.strip() for s in payload.subjects if s.strip()) or None
+    if payload.tutors is not None:
+        student.child_profile.tutors_text = ", ".join(t.strip() for t in payload.tutors if t.strip()) or None
+    if payload.contract_label is not None:
+        student.child_profile.contract_label = payload.contract_label.strip() or None
+
+    parent_user = None
+    for link in student.child_profile.parents:
+        if link.parent and link.parent.user:
+            parent_user = link.parent.user
+            break
+    if parent_user:
+        if payload.parent_name is not None:
+            parts = payload.parent_name.strip().split()
+            parent_user.last_name = parts[0] if parts else ""
+            parent_user.first_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+        if payload.parent_phone is not None:
+            parent_user.phone = payload.parent_phone.strip() or None
 
     await db.commit()
     return {
@@ -303,6 +332,11 @@ async def update_admin_student(
         "lessons_per_week": student.child_profile.lessons_per_week,
         "notes": student.child_profile.notes,
         "channel": student.child_profile.channel,
+        "subjects": [s.strip() for s in (student.child_profile.subjects_text or "").split(",") if s.strip()],
+        "tutors": [t.strip() for t in (student.child_profile.tutors_text or "").split(",") if t.strip()],
+        "contract_label": student.child_profile.contract_label,
+        "parent_name": f"{parent_user.last_name} {parent_user.first_name}".strip() if parent_user else "",
+        "parent_phone": parent_user.phone if parent_user else "",
     }
 
 
@@ -325,15 +359,20 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
         if not user:
             continue
         parents = [link.parent.user for link in child.parents if link.parent and link.parent.user]
-        subjects = sorted({lesson.subject.name for lesson in child.lessons if lesson.subject})
-        tutors = sorted({
+        lesson_subjects = sorted({lesson.subject.name for lesson in child.lessons if lesson.subject})
+        lesson_tutors = sorted({
             f"{lesson.tutor.user.last_name} {lesson.tutor.user.first_name}".strip()
             for lesson in child.lessons
             if lesson.tutor and lesson.tutor.user
         })
+        subjects = [s.strip() for s in (child.subjects_text or "").split(",") if s.strip()] or lesson_subjects
+        tutors = [t.strip() for t in (child.tutors_text or "").split(",") if t.strip()] or lesson_tutors
         contract_count_res = await db.execute(
             select(func.count(ParentContract.id)).where(ParentContract.child_id == child.id)
         )
+        has_contract = (contract_count_res.scalar() or 0) > 0
+        parent_names = [f"{p.last_name} {p.first_name}".strip() for p in parents]
+        parent_phones = [p.phone for p in parents if p.phone]
         rows.append({
             "child_id": child.id,
             "user_id": user.id,
@@ -344,11 +383,14 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "lessons_per_week": child.lessons_per_week,
             "subjects": subjects,
             "tutors": tutors,
-            "has_contract": (contract_count_res.scalar() or 0) > 0,
+            "has_contract": has_contract,
+            "contract_label": child.contract_label or ("Есть" if has_contract else "Нет"),
             "notes": child.notes or "",
             "student_phone": user.phone,
-            "parent_names": [f"{p.last_name} {p.first_name}".strip() for p in parents],
-            "parent_phones": [p.phone for p in parents if p.phone],
+            "parent_names": parent_names,
+            "parent_phones": parent_phones,
+            "parent_name": parent_names[0] if parent_names else "",
+            "parent_phone": parent_phones[0] if parent_phones else "",
             "channel": child.channel or "",
         })
     return rows
@@ -360,11 +402,6 @@ async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
-        )
-    )
-    tutor_result = await db.execute(
-        select(TutorContract).options(
-            joinedload(TutorContract.tutor).joinedload(TutorProfile.user),
         )
     )
     rows = []
@@ -388,28 +425,6 @@ async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
             "email": parent_user.email if parent_user else "",
             "letter": False,
             "student_name": f"{child_user.last_name} {child_user.first_name}".strip() if child_user else "",
-            "total_amount": None,
-            "file_url": contract.signed_file_url or contract.file_url,
-        })
-    for contract in tutor_result.scalars().unique().all():
-        tutor_user = contract.tutor.user if contract.tutor else None
-        rows.append({
-            "id": f"tutor-{contract.id}",
-            "number": f"T-{contract.id:04d}",
-            "type": "Репетитор",
-            "status": "Действующий" if contract.signed_file_url or contract.signed_at else "Ожидает подписи",
-            "start_date": contract.created_at.date().isoformat() if contract.created_at else None,
-            "end_date": None,
-            "parent_full_name": "",
-            "parent_phone": "",
-            "city": "",
-            "street": "",
-            "house": "",
-            "flat": "",
-            "index": "",
-            "email": tutor_user.email if tutor_user else "",
-            "letter": False,
-            "student_name": f"{tutor_user.last_name} {tutor_user.first_name}".strip() if tutor_user else "",
             "total_amount": None,
             "file_url": contract.signed_file_url or contract.file_url,
         })

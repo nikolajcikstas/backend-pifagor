@@ -51,6 +51,18 @@ async def lifespan(app: FastAPI):
                     "ADD COLUMN IF NOT EXISTS channel VARCHAR(100)"
                 ))
                 await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS subjects_text TEXT"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS tutors_text TEXT"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS contract_label VARCHAR(100)"
+                ))
+                await conn.execute(text(
                     "ALTER TABLE tutor_contracts "
                     "ADD COLUMN IF NOT EXISTS signed_file_url VARCHAR(500)"
                 ))

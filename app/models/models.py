@@ -108,6 +108,9 @@ class ChildProfile(Base):
     lessons_per_week: Mapped[Optional[int]] = mapped_column(Integer)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     channel: Mapped[Optional[str]] = mapped_column(String(100))
+    subjects_text: Mapped[Optional[str]] = mapped_column(Text)
+    tutors_text: Mapped[Optional[str]] = mapped_column(Text)
+    contract_label: Mapped[Optional[str]] = mapped_column(String(100))
 
     user: Mapped["User"] = relationship(back_populates="child_profile")
     parents: Mapped[List["ParentChild"]] = relationship(back_populates="child")
