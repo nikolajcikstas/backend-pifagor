@@ -35,9 +35,37 @@ async def lifespan(app: FastAPI):
                     "ADD COLUMN IF NOT EXISTS lesson_price DOUBLE PRECISION NOT NULL DEFAULT 40"
                 ))
                 await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS crm_status VARCHAR(50) NOT NULL DEFAULT 'Пробное'"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS lessons_per_week INTEGER"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS notes TEXT"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE child_profiles "
+                    "ADD COLUMN IF NOT EXISTS channel VARCHAR(100)"
+                ))
+                await conn.execute(text(
                     "ALTER TABLE tutor_contracts "
                     "ADD COLUMN IF NOT EXISTS signed_file_url VARCHAR(500)"
                 ))
+                for name, slug in (
+                    ("Математика", "matematika"),
+                    ("Физика", "fizika"),
+                    ("Английский язык", "angliyskiy"),
+                    ("Биология", "biologiya"),
+                    ("Химия", "himiya"),
+                ):
+                    await conn.execute(text(
+                        "INSERT INTO subjects (name, slug, is_active) "
+                        "VALUES (:name, :slug, TRUE) "
+                        "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, is_active = TRUE"
+                    ), {"name": name, "slug": slug})
         logger.info("Database schema initialization complete")
     except Exception:
         logger.exception("Database schema initialization failed")

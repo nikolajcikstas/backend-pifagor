@@ -40,6 +40,10 @@ class AdminStudentUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
+    status: Optional[str] = None
+    lessons_per_week: Optional[int] = None
+    notes: Optional[str] = None
+    channel: Optional[str] = None
 
 
 class TutorWorkDocumentCreate(BaseModel):
@@ -278,6 +282,14 @@ async def update_admin_student(
         student.last_name = payload.last_name.strip()
     if payload.phone is not None:
         student.phone = payload.phone.strip() or None
+    if payload.status is not None:
+        student.child_profile.crm_status = payload.status.strip() or "Пробное"
+    if payload.lessons_per_week is not None:
+        student.child_profile.lessons_per_week = payload.lessons_per_week
+    if payload.notes is not None:
+        student.child_profile.notes = payload.notes.strip() or None
+    if payload.channel is not None:
+        student.child_profile.channel = payload.channel.strip() or None
 
     await db.commit()
     return {
@@ -287,6 +299,10 @@ async def update_admin_student(
         "first_name": student.first_name,
         "last_name": student.last_name,
         "phone": student.phone,
+        "status": student.child_profile.crm_status,
+        "lessons_per_week": student.child_profile.lessons_per_week,
+        "notes": student.child_profile.notes,
+        "channel": student.child_profile.channel,
     }
 
 
@@ -321,19 +337,19 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
         rows.append({
             "child_id": child.id,
             "user_id": user.id,
-            "status": "Клиент" if user.is_active else "Не занимаются",
+            "status": child.crm_status if user.is_active else "Не занимаются",
             "lesson_price": child.lesson_price,
             "student_name": f"{user.last_name} {user.first_name}".strip(),
             "grade": child.grade,
-            "lessons_per_week": None,
+            "lessons_per_week": child.lessons_per_week,
             "subjects": subjects,
             "tutors": tutors,
             "has_contract": (contract_count_res.scalar() or 0) > 0,
-            "notes": "",
+            "notes": child.notes or "",
             "student_phone": user.phone,
             "parent_names": [f"{p.last_name} {p.first_name}".strip() for p in parents],
             "parent_phones": [p.phone for p in parents if p.phone],
-            "channel": "",
+            "channel": child.channel or "",
         })
     return rows
 
@@ -737,3 +753,4 @@ async def list_admin_acts(
         q = q.where(Act.tutor_id == tutor_id)
     result = await db.execute(q.order_by(Act.created_at.desc()))
     return result.scalars().all()
+
