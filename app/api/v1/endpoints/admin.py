@@ -97,6 +97,35 @@ async def _delete_invite_codes_for_user(db: AsyncSession, user_id: int) -> int:
     return len(codes)
 
 
+async def _delete_invite_codes_for_descriptions(db: AsyncSession, descriptions: set[str]) -> int:
+    clean = {item.strip() for item in descriptions if item and item.strip()}
+    if not clean:
+        return 0
+
+    result = await db.execute(select(InviteCode).where(InviteCode.description.in_(clean)))
+    direct_codes = result.scalars().all()
+    code_ids = {code.id for code in direct_codes}
+    code_ids.update(code.linked_code_id for code in direct_codes if code.linked_code_id)
+
+    if not code_ids:
+        return 0
+
+    related = await db.execute(
+        select(InviteCode).where(
+            (InviteCode.id.in_(code_ids)) | (InviteCode.linked_code_id.in_(code_ids))
+        )
+    )
+    codes = related.scalars().all()
+    for code in codes:
+        code.linked_code_id = None
+    await db.flush()
+
+    for code in codes:
+        await db.delete(code)
+
+    return len(codes)
+
+
 @router.post("/invite-codes", response_model=List[InviteCodeResponse])
 async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depends(get_db)):
     role_str = str(payload.role).strip().lower()
@@ -167,7 +196,31 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
 @router.get("/invite-codes", response_model=List[InviteCodeResponse])
 async def list_invite_codes(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(InviteCode).order_by(InviteCode.created_at.desc()))
-    return result.scalars().all()
+    codes = result.scalars().all()
+
+    child_users_result = await db.execute(
+        select(User.first_name, User.last_name).join(ChildProfile, ChildProfile.user_id == User.id)
+    )
+    child_user_rows = child_users_result.all()
+    active_child_names = {
+        f"{last} {first}".strip()
+        for first, last in child_user_rows
+        if first or last
+    } | {
+        f"{first} {last}".strip()
+        for first, last in child_user_rows
+        if first or last
+    }
+
+    visible = []
+    for code in codes:
+        description = (code.description or "").strip()
+        if code.role in (RoleEnum.child, RoleEnum.parent) and description:
+            if description not in active_child_names:
+                continue
+        visible.append(code)
+    return visible
+
 
 
 @router.delete("/invite-codes", dependencies=[Depends(require_admin)])
@@ -670,10 +723,16 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
     if not user:
         raise HTTPException(status_code=404, detail="Student not found")
 
+    student_descriptions = {
+        f"{user.last_name} {user.first_name}".strip(),
+        f"{user.first_name} {user.last_name}".strip(),
+    }
+
     result = await db.execute(select(ChildProfile).where(ChildProfile.user_id == user_id))
     child = result.scalar_one_or_none()
     if not child:
         await _delete_invite_codes_for_user(db, user_id)
+        await _delete_invite_codes_for_descriptions(db, student_descriptions)
         notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
         for notification in notifications.scalars().all():
             await db.delete(notification)
@@ -712,6 +771,7 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
         receipt.child_id = None
 
     await _delete_invite_codes_for_user(db, user_id)
+    await _delete_invite_codes_for_descriptions(db, student_descriptions)
 
     notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
     for notification in notifications.scalars().all():
