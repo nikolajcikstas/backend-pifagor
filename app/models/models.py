@@ -22,6 +22,7 @@ class RoleEnum(str, enum.Enum):
 
 class LessonStatus(str, enum.Enum):
     scheduled = "scheduled"
+    trial = "trial"
     completed = "completed"
     cancelled = "cancelled"
     rescheduled = "rescheduled"
