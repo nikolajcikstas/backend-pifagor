@@ -7,12 +7,13 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.models.models import (
     Report, Homework, Payment, Test, TestQuestion, TestAnswer,
     TestResult, Notification, Comment, Act, ParentContract, TutorContract,
-    User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument
+    User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument, ChildProfile
 )
 from app.schemas.schemas import (
     ReportCreate, ReportOut,
@@ -28,6 +29,23 @@ from app.core.deps import get_current_user, require_admin, require_tutor
 router = APIRouter(tags=["cabinet"])
 
 
+def _user_name(user: User | None) -> str:
+    if not user:
+        return ""
+    return f"{user.last_name or ''} {user.first_name or ''}".strip() or user.email
+
+
+async def _notify(db: AsyncSession, user_id: int | None, title: str, body: str) -> None:
+    if user_id:
+        db.add(Notification(user_id=user_id, title=title, body=body))
+
+
+async def _notify_admins(db: AsyncSession, title: str, body: str) -> None:
+    result = await db.execute(select(User.id).where(User.role == RoleEnum.admin, User.is_active == True))
+    for user_id in result.scalars().all():
+        db.add(Notification(user_id=user_id, title=title, body=body))
+
+
 # ─── Reports ──────────────────────────────────────────────────────────────────
 
 @router.get("/reports", response_model=List[ReportOut])
@@ -39,8 +57,18 @@ async def list_reports(
     q = select(Report)
     if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
         q = q.where(Report.tutor_id == current_user.tutor_profile.id)
-    elif child_id:
-        q = q.where(Report.child_id == child_id)
+    elif current_user.role == RoleEnum.child and current_user.child_profile:
+        q = q.where(Report.child_id == current_user.child_profile.id)
+    elif current_user.role == RoleEnum.parent and current_user.parent_profile:
+        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        if child_id and child_id not in child_ids:
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+        q = q.where(Report.child_id == (child_id or child_ids[0]) if child_id else Report.child_id.in_(child_ids))
+    elif current_user.role == RoleEnum.admin:
+        if child_id:
+            q = q.where(Report.child_id == child_id)
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(q.order_by(Report.created_at.desc()))
     return result.scalars().all()
 
@@ -53,6 +81,12 @@ async def create_report(
 ):
     report = Report(**data.model_dump(), tutor_id=current_user.tutor_profile.id)
     db.add(report)
+    child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(selectinload(ChildProfile.user)))
+    await _notify_admins(
+        db,
+        "Новый отчёт",
+        f"Репетитор {_user_name(current_user)} добавил отчёт по ученику {_user_name(child.user if child else None)}.",
+    )
     await db.commit()
     await db.refresh(report)
     return report
@@ -86,8 +120,21 @@ async def list_homeworks(
     q = select(Homework)
     if current_user.role == RoleEnum.child and current_user.child_profile:
         q = q.where(Homework.child_id == current_user.child_profile.id)
-    elif child_id:
-        q = q.where(Homework.child_id == child_id)
+    elif current_user.role == RoleEnum.parent and current_user.parent_profile:
+        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        if child_id and child_id not in child_ids:
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+        q = q.where(Homework.child_id == child_id if child_id else Homework.child_id.in_(child_ids))
+    elif current_user.role == RoleEnum.tutor and current_user.tutor_profile:
+        lesson_ids = select(Lesson.id).where(Lesson.tutor_id == current_user.tutor_profile.id)
+        q = q.where(Homework.lesson_id.in_(lesson_ids))
+        if child_id:
+            q = q.where(Homework.child_id == child_id)
+    elif current_user.role == RoleEnum.admin:
+        if child_id:
+            q = q.where(Homework.child_id == child_id)
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     if lesson_id:
         q = q.where(Homework.lesson_id == lesson_id)
     result = await db.execute(q)
@@ -98,10 +145,28 @@ async def list_homeworks(
 async def create_homework(
     data: HomeworkCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_tutor),
+    current_user: User = Depends(require_tutor),
 ):
+    lesson = await db.scalar(
+        select(Lesson)
+        .where(Lesson.id == data.lesson_id)
+        .options(selectinload(Lesson.child).selectinload(ChildProfile.user))
+    )
+    if not lesson or lesson.tutor_id != current_user.tutor_profile.id or lesson.child_id != data.child_id:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     hw = Homework(**data.model_dump())
     db.add(hw)
+    await _notify(
+        db,
+        lesson.child.user_id if lesson.child else None,
+        "Новое домашнее задание",
+        f"Репетитор {_user_name(current_user)} добавил ДЗ по занятию {lesson.date}.",
+    )
+    await _notify_admins(
+        db,
+        "Домашнее задание добавлено",
+        f"Репетитор {_user_name(current_user)} добавил ДЗ ученику {_user_name(lesson.child.user if lesson.child else None)}.",
+    )
     await db.commit()
     await db.refresh(hw)
     return hw
@@ -122,9 +187,22 @@ async def submit_homework(
     hw = result.scalar_one_or_none()
     if not hw:
         raise HTTPException(status_code=404, detail="Homework not found")
+    if current_user.role == RoleEnum.child and current_user.child_profile:
+        if hw.child_id != current_user.child_profile.id:
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+    elif current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     if body and body.submission_url:
         hw.submission_url = body.submission_url
     hw.is_done = True
+    lesson = await db.scalar(select(Lesson).where(Lesson.id == hw.lesson_id).options(selectinload(Lesson.tutor).selectinload(TutorProfile.user)))
+    await _notify(
+        db,
+        lesson.tutor.user_id if lesson and lesson.tutor else None,
+        "ДЗ выполнено",
+        f"Ученик {_user_name(current_user)} отправил домашнее задание.",
+    )
+    await _notify_admins(db, "ДЗ выполнено", f"Ученик {_user_name(current_user)} отправил домашнее задание.")
     await db.commit()
     return {"ok": True}
 

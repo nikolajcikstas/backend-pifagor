@@ -208,9 +208,17 @@ class LessonOut(BaseModel):
 class ReportCreate(BaseModel):
     child_id: int
     subject_id: int
+    lesson_id: Optional[int] = None
     content: str
     lesson_count: int = 5
     file_url: Optional[str] = None
+    material_score: Optional[int] = None
+    material_comment: Optional[str] = None
+    successes: Optional[str] = None
+    difficulties: Optional[str] = None
+    homework_status: Optional[str] = None
+    homework_comment: Optional[str] = None
+    engagement_score: Optional[int] = None
 
 
 class ReportOut(BaseModel):
@@ -218,9 +226,17 @@ class ReportOut(BaseModel):
     tutor_id: int
     child_id: int
     subject_id: int
+    lesson_id: Optional[int] = None
     content: str
     lesson_count: int
     file_url: Optional[str] = None
+    material_score: Optional[int] = None
+    material_comment: Optional[str] = None
+    successes: Optional[str] = None
+    difficulties: Optional[str] = None
+    homework_status: Optional[str] = None
+    homework_comment: Optional[str] = None
+    engagement_score: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -250,6 +266,7 @@ class HomeworkCreate(BaseModel):
     lesson_id: int
     child_id: int
     description: str
+    file_url: Optional[str] = None
 
 
 class HomeworkOut(BaseModel):

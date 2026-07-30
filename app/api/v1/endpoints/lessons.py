@@ -1,41 +1,45 @@
-from typing import List, Optional
 from datetime import date
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
 from sqlalchemy.orm import joinedload, selectinload
-from app.db.session import get_db
-from app.models.models import Lesson, User, RoleEnum, LessonStatus, ChildProfile, TutorProfile
-from app.schemas.schemas import LessonCreate, LessonUpdate, LessonOut
+
 from app.core.deps import get_current_user
+from app.db.session import get_db
+from app.models.models import (
+    ChildProfile,
+    Lesson,
+    LessonStatus,
+    Notification,
+    ParentChild,
+    ParentProfile,
+    Report,
+    RoleEnum,
+    TutorProfile,
+    User,
+)
+from app.schemas.schemas import LessonCreate, LessonUpdate
 
 router = APIRouter(prefix="/lessons", tags=["lessons"])
 
 
+def _user_name(user: User | None) -> str:
+    if not user:
+        return ""
+    return f"{user.last_name or ''} {user.first_name or ''}".strip() or user.email
+
+
 def _lesson_to_dict(l: Lesson) -> dict:
-    """Convert ORM Lesson to a dict with populated student/tutor/subject names."""
-    student_name = None
-    tutor_name = None
-    subject_name = None
-
-    if l.child and l.child.user:
-        u = l.child.user
-        student_name = f"{u.last_name} {u.first_name}".strip() or u.email
-    if l.tutor and l.tutor.user:
-        u = l.tutor.user
-        tutor_name = f"{u.last_name} {u.first_name}".strip() or u.email
-    if l.subject:
-        subject_name = l.subject.name
-
     return {
         "id": l.id,
         "tutor_id": l.tutor_id,
         "child_id": l.child_id,
         "subject_id": l.subject_id,
-        "student_name": student_name,
-        "tutor_name": tutor_name,
-        "subject_name": subject_name,
+        "student_name": _user_name(l.child.user if l.child else None),
+        "tutor_name": _user_name(l.tutor.user if l.tutor else None),
+        "subject_name": l.subject.name if l.subject else None,
         "date": str(l.date),
         "time_start": str(l.time_start),
         "time_end": str(l.time_end),
@@ -47,56 +51,101 @@ def _lesson_to_dict(l: Lesson) -> dict:
     }
 
 
-def _lessons_query_with_joins(base_q):
-    """Apply eager-load joins to a Lesson select query."""
-    return base_q.options(
+def _lesson_options(stmt):
+    return stmt.options(
         joinedload(Lesson.tutor).joinedload(TutorProfile.user),
         joinedload(Lesson.child).joinedload(ChildProfile.user),
         joinedload(Lesson.subject),
     )
 
 
+async def _notify(db: AsyncSession, user_id: int | None, title: str, body: str) -> None:
+    if user_id:
+        db.add(Notification(user_id=user_id, title=title, body=body))
+
+
+async def _notify_admins(db: AsyncSession, title: str, body: str) -> None:
+    result = await db.execute(select(User.id).where(User.role == RoleEnum.admin, User.is_active == True))
+    for user_id in result.scalars().all():
+        db.add(Notification(user_id=user_id, title=title, body=body))
+
+
+async def _load_lesson(db: AsyncSession, lesson_id: int) -> Lesson | None:
+    result = await db.execute(_lesson_options(select(Lesson).where(Lesson.id == lesson_id)))
+    return result.scalars().unique().one_or_none()
+
+
+def _can_access_lesson(user: User, lesson: Lesson) -> bool:
+    if user.role == RoleEnum.admin:
+        return True
+    if user.role == RoleEnum.tutor and user.tutor_profile:
+        return lesson.tutor_id == user.tutor_profile.id
+    if user.role == RoleEnum.child and user.child_profile:
+        return lesson.child_id == user.child_profile.id
+    if user.role == RoleEnum.parent and user.parent_profile:
+        return any(pc.child_id == lesson.child_id for pc in user.parent_profile.children)
+    return False
+
+
+async def _require_report_for_fifth_lesson(db: AsyncSession, lesson: Lesson) -> None:
+    completed_before = await db.scalar(
+        select(func.count(Lesson.id)).where(
+            Lesson.child_id == lesson.child_id,
+            Lesson.status == LessonStatus.completed,
+            Lesson.id != lesson.id,
+        )
+    ) or 0
+    next_number = completed_before + 1
+    if next_number % 5 != 0:
+        return
+
+    report_exists = await db.scalar(
+        select(func.count(Report.id)).where(
+            Report.child_id == lesson.child_id,
+            Report.lesson_id == lesson.id,
+        )
+    ) or 0
+    if not report_exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Для каждого 5-го занятия ученика нужно сначала заполнить отчёт.",
+        )
+
+
 @router.get("/", response_model=List[dict])
 async def get_lessons(
-        tutor_id: Optional[int] = Query(None),
-        child_id: Optional[int] = Query(None),
-        date_from: Optional[date] = Query(None),
-        date_to: Optional[date] = Query(None),
-        status: Optional[LessonStatus] = Query(None),
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+    tutor_id: Optional[int] = Query(None),
+    child_id: Optional[int] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    status: Optional[LessonStatus] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     filters = []
 
     if current_user.role == RoleEnum.tutor:
-        if current_user.tutor_profile:
-            filters.append(Lesson.tutor_id == current_user.tutor_profile.id)
-        else:
+        if not current_user.tutor_profile:
             return []
+        filters.append(Lesson.tutor_id == current_user.tutor_profile.id)
     elif current_user.role == RoleEnum.child:
-        if current_user.child_profile:
-            filters.append(Lesson.child_id == current_user.child_profile.id)
-        else:
+        if not current_user.child_profile:
             return []
+        filters.append(Lesson.child_id == current_user.child_profile.id)
     elif current_user.role == RoleEnum.parent:
-        if current_user.parent_profile:
-            child_ids = [pc.child_id for pc in current_user.parent_profile.children]
-            if child_ids:
-                filters.append(Lesson.child_id.in_(child_ids))
-            elif child_id:
-                filters.append(Lesson.child_id == child_id)
-            else:
-                return []
-        elif child_id:
-            filters.append(Lesson.child_id == child_id)
-        else:
+        if not current_user.parent_profile:
             return []
-    else:
-        # admin sees all, can filter
+        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        if not child_ids:
+            return []
+        filters.append(Lesson.child_id.in_(child_ids))
+    elif current_user.role == RoleEnum.admin:
         if tutor_id:
             filters.append(Lesson.tutor_id == tutor_id)
         if child_id:
             filters.append(Lesson.child_id == child_id)
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
 
     if date_from:
         filters.append(Lesson.date >= date_from)
@@ -105,329 +154,220 @@ async def get_lessons(
     if status:
         filters.append(Lesson.status == status)
 
-    q = select(Lesson)
+    stmt = select(Lesson)
     if filters:
-        q = q.where(and_(*filters))
-    q = q.order_by(Lesson.date, Lesson.time_start)
-
-    q = _lessons_query_with_joins(q)
-    result = await db.execute(q)
-    lessons = result.scalars().unique().all()
-    return [_lesson_to_dict(l) for l in lessons]
+        stmt = stmt.where(and_(*filters))
+    stmt = _lesson_options(stmt.order_by(Lesson.date, Lesson.time_start))
+    result = await db.execute(stmt)
+    return [_lesson_to_dict(l) for l in result.scalars().unique().all()]
 
 
 @router.post("/", response_model=dict, status_code=201)
 async def create_lesson(
-        data: LessonCreate,
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+    data: LessonCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    from sqlalchemy.exc import IntegrityError
-
-    # Validate tutor_profile exists
-    tp_res = await db.execute(select(TutorProfile).where(TutorProfile.id == data.tutor_id))
-    if not tp_res.scalar_one_or_none():
+    tutor = await db.scalar(select(TutorProfile).where(TutorProfile.id == data.tutor_id).options(joinedload(TutorProfile.user)))
+    if not tutor:
         raise HTTPException(status_code=422, detail=f"Репетитор с профилем id={data.tutor_id} не найден")
 
-    # Validate child_profile exists
-    cp_res = await db.execute(select(ChildProfile).where(ChildProfile.id == data.child_id))
-    if not cp_res.scalar_one_or_none():
-        raise HTTPException(status_code=422,
-                            detail=f"Ученик с профилем id={data.child_id} не найден. Попросите ученика войти в систему хотя бы раз.")
+    child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(joinedload(ChildProfile.user)))
+    if not child:
+        raise HTTPException(status_code=422, detail=f"Ученик с профилем id={data.child_id} не найден")
 
-    try:
-        lesson = Lesson(**data.model_dump())
-        db.add(lesson)
-        await db.commit()
+    if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
+        if current_user.tutor_profile.id != data.tutor_id:
+            raise HTTPException(status_code=403, detail="Репетитор может создавать занятия только себе")
+    elif current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Создавать занятия может только админ или репетитор")
 
-        # Запрашиваем созданный урок из базы сразу со всеми связями
-        stmt = (
-            select(Lesson)
-            .where(Lesson.id == lesson.id)
-            .options(
-                selectinload(Lesson.child).selectinload(ChildProfile.user),
-                selectinload(Lesson.tutor).selectinload(TutorProfile.user),
-                selectinload(Lesson.subject)
-            )
+    lesson = Lesson(**data.model_dump())
+    db.add(lesson)
+    await db.flush()
+
+    student_name = _user_name(child.user)
+    if current_user.role == RoleEnum.admin:
+        await _notify(
+            db,
+            tutor.user_id,
+            "Новое занятие",
+            f"Администратор назначил занятие с учеником {student_name} на {lesson.date} {lesson.time_start}.",
         )
-        res = await db.execute(stmt)
-        fresh_lesson = res.scalar_one()
+    else:
+        await _notify_admins(
+            db,
+            "Новое занятие от репетитора",
+            f"{_user_name(current_user)} назначил занятие с учеником {student_name} на {lesson.date} {lesson.time_start}.",
+        )
 
-        return _lesson_to_dict(fresh_lesson)
-
-    except IntegrityError as e:
-        await db.rollback()
-        raise HTTPException(status_code=422, detail=f"Ошибка базы данных: {str(e.orig)}")
+    await db.commit()
+    fresh = await _load_lesson(db, lesson.id)
+    return _lesson_to_dict(fresh)
 
 
 @router.get("/tutor/my-students", response_model=list[dict])
 async def get_tutor_students(
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Return unique students who have lessons with the current tutor."""
     if current_user.role not in (RoleEnum.tutor, RoleEnum.admin):
-        raise HTTPException(status_code=403, detail="Only tutors can access this")
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
 
-    tutor_profile_id = None
-    if current_user.role == RoleEnum.tutor:
-        if not current_user.tutor_profile:
-            return []
-        tutor_profile_id = current_user.tutor_profile.id
-
-    q = select(Lesson)
+    tutor_profile_id = current_user.tutor_profile.id if current_user.role == RoleEnum.tutor and current_user.tutor_profile else None
+    stmt = select(Lesson.child_id)
     if tutor_profile_id:
-        q = q.where(Lesson.tutor_id == tutor_profile_id)
-
-    result = await db.execute(q)
-    lessons = result.scalars().all()
-
-    child_ids = list({l.child_id for l in lessons})
+        stmt = stmt.where(Lesson.tutor_id == tutor_profile_id)
+    result = await db.execute(stmt)
+    child_ids = list({item for item in result.scalars().all()})
     if not child_ids:
         return []
 
     child_result = await db.execute(
         select(ChildProfile)
-        .options(joinedload(ChildProfile.user))
+        .options(
+            joinedload(ChildProfile.user),
+            selectinload(ChildProfile.parents).selectinload(ParentChild.parent).joinedload(ParentProfile.user),
+        )
         .where(ChildProfile.id.in_(child_ids))
     )
     children = child_result.scalars().unique().all()
 
     output = []
-    for c in children:
-        if c.user:
-            output.append({
-                "child_profile_id": c.id,
-                "user_id": c.user.id,
-                "first_name": c.user.first_name,
-                "last_name": c.user.last_name,
-                "email": c.user.email,
-            })
-
-    return output
-
-
-@router.get("/students-list/all", response_model=list[dict])
-async def list_students_for_tutor_compat(db: AsyncSession = Depends(get_db)):
-    try:
-        query = (
-            select(User)
-            .where(User.role == RoleEnum.child, User.is_active == True)
-            .options(joinedload(User.child_profile))
-        )
-        result = await db.execute(query)
-        students = result.scalars().unique().all()
-
-        output = []
-        for s in students:
-            cp = s.child_profile
-            if cp is None:
-                continue
-
-            output.append({
-                "id": s.id,
-                "first_name": s.first_name,
-                "last_name": s.last_name,
-                "email": s.email,
-                "child_profile": {"id": cp.id},
-            })
-
-        return output
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@router.get("/tutor-calendar/all", response_model=list[dict])
-async def get_lessons_for_tutor_compat(db: AsyncSession = Depends(get_db)):
-    query = select(Lesson).options(joinedload(Lesson.child).joinedload(ChildProfile.user))
-    result = await db.execute(query)
-    lessons = result.scalars().unique().all()
-
-    output = []
-    for l in lessons:
-        first_name = "Student"
-        last_name = ""
-        email = ""
-
-        if l.child and l.child.user:
-            first_name = l.child.user.first_name
-            last_name = l.child.user.last_name
-            email = l.child.user.email
-
+    for child in children:
+        parent_user = None
+        if child.parents:
+            parent_user = child.parents[0].parent.user
         output.append({
-            "id": l.id,
-            "tutor_id": l.tutor_id,
-            "child_id": l.child_id,
-            "subject_id": l.subject_id,
-            "date": str(l.date),
-            "time_start": str(l.time_start),
-            "time_end": str(l.time_end),
-            "status": l.status,
-            "notes": l.notes or "",
-            "is_free_trial": l.is_free_trial,
-            "child": {
-                "id": l.child_id,
-                "first_name": first_name,
-                "last_name": last_name,
-                "email": email,
-            } if l.child else None,
+            "child_profile_id": child.id,
+            "user_id": child.user.id,
+            "first_name": child.user.first_name,
+            "last_name": child.user.last_name,
+            "email": child.user.email,
+            "student_phone": child.user.phone,
+            "parent_name": _user_name(parent_user),
+            "parent_phone": parent_user.phone if parent_user else None,
+            "lessons_per_week": child.lessons_per_week,
+            "notes": child.notes,
+            "subjects": [s.strip() for s in (child.subjects_text or "").split(",") if s.strip()],
         })
     return output
 
 
-@router.get("/{lesson_id}", response_model=LessonOut)
-async def get_lesson(
-        lesson_id: int,
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+@router.get("/students-list/all", response_model=list[dict])
+async def list_students_for_admin(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    q = select(Lesson).where(Lesson.id == lesson_id).options(
-        joinedload(Lesson.tutor).joinedload(TutorProfile.user),
-        joinedload(Lesson.child).joinedload(ChildProfile.user),
-        joinedload(Lesson.subject)
+    if current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Список всех учеников доступен только админу")
+
+    result = await db.execute(
+        select(User)
+        .where(User.role == RoleEnum.child, User.is_active == True)
+        .options(joinedload(User.child_profile))
+        .order_by(User.last_name, User.first_name)
     )
+    output = []
+    for user in result.scalars().unique().all():
+        if not user.child_profile:
+            continue
+        output.append({
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "child_profile": {"id": user.child_profile.id},
+        })
+    return output
 
-    result = await db.execute(q)
-    lesson = result.scalar_one_or_none()
 
+@router.get("/{lesson_id}", response_model=dict)
+async def get_lesson(
+    lesson_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    lesson = await _load_lesson(db, lesson_id)
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
-
-    if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
-        if lesson.tutor_id != current_user.tutor_profile.id:
-            raise HTTPException(status_code=403, detail="Not enough permissions")
-    if current_user.role == RoleEnum.child and current_user.child_profile:
-        if lesson.child_id != current_user.child_profile.id:
-            raise HTTPException(status_code=403, detail="Not enough permissions")
-
-    return lesson
+        raise HTTPException(status_code=404, detail="Занятие не найдено")
+    if not _can_access_lesson(current_user, lesson):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    return _lesson_to_dict(lesson)
 
 
 @router.patch("/{lesson_id}", response_model=dict)
 async def update_lesson(
-        lesson_id: int,
-        data: LessonUpdate,
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+    lesson_id: int,
+    data: LessonUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Lesson)
-        .where(Lesson.id == lesson_id)
-    )
-    lesson = result.scalar_one_or_none()
+    lesson = await _load_lesson(db, lesson_id)
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
+        raise HTTPException(status_code=404, detail="Занятие не найдено")
+    if current_user.role not in (RoleEnum.admin, RoleEnum.tutor):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    if current_user.role == RoleEnum.tutor and (not current_user.tutor_profile or lesson.tutor_id != current_user.tutor_profile.id):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    updates = data.model_dump(exclude_none=True)
+    if updates.get("status") == LessonStatus.completed and lesson.status != LessonStatus.completed:
+        await _require_report_for_fifth_lesson(db, lesson)
+
+    old_status = lesson.status
+    for field, value in updates.items():
         setattr(lesson, field, value)
 
-    await db.commit()
-
-    # --- ИСПРАВЛЕНИЕ ТУТ: Подгружаем связи после обновления, чтобы не было ошибки 500 ---
-    stmt = (
-        select(Lesson)
-        .where(Lesson.id == lesson_id)
-        .options(
-            selectinload(Lesson.child).selectinload(ChildProfile.user),
-            selectinload(Lesson.tutor).selectinload(TutorProfile.user),
-            selectinload(Lesson.subject)
+    target_title = "Занятие изменено"
+    student_name = _user_name(lesson.child.user if lesson.child else None)
+    if current_user.role == RoleEnum.admin:
+        await _notify(
+            db,
+            lesson.tutor.user_id if lesson.tutor else None,
+            target_title,
+            f"Администратор изменил занятие с учеником {student_name} на {lesson.date}.",
         )
-    )
-    res = await db.execute(stmt)
-    fresh_lesson = res.scalar_one()
+    else:
+        await _notify_admins(
+            db,
+            target_title,
+            f"{_user_name(current_user)} изменил занятие с учеником {student_name} на {lesson.date}.",
+        )
 
-    return _lesson_to_dict(fresh_lesson)
+    if "status" in updates and updates["status"] != old_status:
+        await _notify_admins(
+            db,
+            "Статус занятия обновлён",
+            f"Занятие ученика {student_name} получило статус {updates['status']}.",
+        )
+
+    await db.commit()
+    fresh = await _load_lesson(db, lesson_id)
+    return _lesson_to_dict(fresh)
 
 
 @router.delete("/{lesson_id}", status_code=204)
 async def delete_lesson(
-        lesson_id: int,
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+    lesson_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Lesson).where(Lesson.id == lesson_id))
-    lesson = result.scalar_one_or_none()
+    lesson = await _load_lesson(db, lesson_id)
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
+        raise HTTPException(status_code=404, detail="Занятие не найдено")
+    if current_user.role != RoleEnum.admin and (
+        current_user.role != RoleEnum.tutor
+        or not current_user.tutor_profile
+        or lesson.tutor_id != current_user.tutor_profile.id
+    ):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+
+    student_name = _user_name(lesson.child.user if lesson.child else None)
+    if current_user.role == RoleEnum.admin:
+        await _notify(db, lesson.tutor.user_id if lesson.tutor else None, "Занятие удалено", f"Администратор удалил занятие с учеником {student_name}.")
+    else:
+        await _notify_admins(db, "Занятие удалено", f"{_user_name(current_user)} удалил занятие с учеником {student_name}.")
+
     await db.delete(lesson)
     await db.commit()
-
-
-@router.get("/students-list/all", response_model=list[dict])
-async def list_students_for_tutor_fixed(db: AsyncSession = Depends(get_db)):
-    try:
-        query = (
-            select(User)
-            .where(User.role == RoleEnum.child, User.is_active == True)
-            .options(joinedload(User.child_profile))
-        )
-        result = await db.execute(query)
-        students = result.scalars().unique().all()
-
-        output = []
-        for s in students:
-            cp = s.child_profile
-            if cp is None:
-                continue
-
-            output.append({
-                "id": s.id,
-                "first_name": s.first_name,
-                "last_name": s.last_name,
-                "email": s.email,
-                "child_profile": {"id": cp.id}
-            })
-
-        return output
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
-
-
-@router.get("/tutor-calendar/all", response_model=list[dict])
-async def get_lessons_for_tutor_fixed(
-        db: AsyncSession = Depends(get_db)
-):
-    try:
-        query = select(Lesson).options(joinedload(Lesson.child).joinedload(ChildProfile.user))
-        result = await db.execute(query)
-        lessons = result.scalars().unique().all()
-
-        output = []
-        for l in lessons:
-            first_name = "Ученик"
-            last_name = ""
-            email = ""
-
-            if l.child:
-                if hasattr(l.child, "user") and l.child.user is not None:
-                    first_name = getattr(l.child.user, "first_name", "Ученик")
-                    last_name = getattr(l.child.user, "last_name", "")
-                    email = getattr(l.child.user, "email", "")
-                else:
-                    first_name = getattr(l.child, "first_name", "Ученик")
-                    last_name = getattr(l.child, "last_name", "")
-                    email = getattr(l.child, "email", "")
-
-            output.append({
-                "id": l.id,
-                "tutor_id": l.tutor_id,
-                "child_id": l.child_id,
-                "subject_id": l.subject_id,
-                "date": str(l.date),
-                "time_start": str(l.time_start),
-                "time_end": str(l.time_end),
-                "status": l.status,
-                "notes": l.notes or "",
-                "is_free_trial": l.is_free_trial,
-                "child": {
-                    "id": l.child_id,
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "email": email
-                } if l.child else None
-            })
-        return output
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

@@ -11,6 +11,7 @@ from pydantic import BaseModel  # 🌟 Добавили для Pydantic схем
 
 from app.db.session import get_db
 from app.core.deps import require_admin
+from app.core.security import get_password_hash
 from app.models.models import (
     InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
@@ -61,6 +62,13 @@ def generate_random_code(prefix: str) -> str:
     return f"PIF-{prefix.upper()}-{secrets.token_hex(3).upper()}"
 
 
+def _split_name(raw: str | None) -> tuple[str, str]:
+    parts = (raw or "Новый ученик").strip().split()
+    if len(parts) >= 2:
+        return parts[1], parts[0]
+    return parts[0] if parts else "Новый", "ученик"
+
+
 async def _delete_invite_codes_for_user(db: AsyncSession, user_id: int) -> int:
     result = await db.execute(select(InviteCode).where(InviteCode.used_by_user_id == user_id))
     direct_codes = result.scalars().all()
@@ -107,6 +115,42 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
             linked_code_id=child_invite.id
         )
         db.add(parent_invite)
+
+        first_name, last_name = _split_name(payload.description)
+        placeholder_password = get_password_hash(secrets.token_urlsafe(24))
+
+        child_user = User(
+            email=f"placeholder-child-{child_code.lower()}@pifagor.local",
+            hashed_password=placeholder_password,
+            first_name=first_name,
+            last_name=last_name,
+            middle_name="",
+            phone=None,
+            role=RoleEnum.child,
+            is_active=True,
+        )
+        parent_user = User(
+            email=f"placeholder-parent-{parent_code.lower()}@pifagor.local",
+            hashed_password=placeholder_password,
+            first_name="Родитель",
+            last_name=f"{last_name} {first_name}".strip(),
+            middle_name="",
+            phone=None,
+            role=RoleEnum.parent,
+            is_active=True,
+        )
+        db.add_all([child_user, parent_user])
+        await db.flush()
+
+        child_profile = ChildProfile(user_id=child_user.id, crm_status="Пробное")
+        parent_profile = ParentProfile(user_id=parent_user.id)
+        db.add_all([child_profile, parent_profile])
+        await db.flush()
+        db.add(ParentChild(parent_id=parent_profile.id, child_id=child_profile.id))
+
+        child_invite.used_by_user_id = child_user.id
+        parent_invite.used_by_user_id = parent_user.id
+
         await db.commit()
         return [child_invite, parent_invite]
 

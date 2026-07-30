@@ -8,11 +8,9 @@ from app.models.models import User
 
 router = APIRouter(prefix="/files", tags=["files"])
 
-# backend/app/uploads
 UPLOAD_DIR = Path(__file__).resolve().parents[3] / "uploads"
-
-ALLOWED_EXTENSIONS = {".pdf"}
-MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp"}
+MAX_FILE_SIZE = 15 * 1024 * 1024
 
 
 @router.post("/upload")
@@ -20,14 +18,14 @@ async def upload_file(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
-    """Загружает PDF-файл (отчёт репетитора или документ от админа) и возвращает публичную ссылку."""
+    """Upload a cabinet document or image and return its public URL."""
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Разрешены только PDF-файлы")
+        raise HTTPException(status_code=400, detail="Разрешены PDF, DOC, DOCX, JPG, PNG и WEBP")
 
     contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 15 МБ)")
+        raise HTTPException(status_code=400, detail="Файл слишком большой, максимум 15 МБ")
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
