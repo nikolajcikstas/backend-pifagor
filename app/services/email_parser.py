@@ -181,12 +181,14 @@ def _fetch_raw_receipts() -> List[Dict]:
 
 async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Optional[int]:
     """
-    Логика сопоставления:
-    1. Ищем пользователя с ролью parent по фамилии+имени из чека
-    2. Находим ParentProfile этого пользователя
-    3. Через ParentChild получаем child_id
+    Strict matching only:
+    1. payer full name == parent full name -> linked child
+    2. payer full name == child full name -> that child
+
+    We intentionally do not match by surname-only or partial stems: that caused
+    wrong links between different people with similar names.
     """
-    from app.models.models import User, ParentProfile, ParentChild, RoleEnum
+    from app.models.models import User, ParentProfile, ParentChild, ChildProfile, RoleEnum
 
     parts = _name_tokens(payer_name)
     if len(parts) < 2:
@@ -203,28 +205,34 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
         if parent.user and _same_person(payer_name, _full_name(parent.user))
     ]
 
-    if len(parents) != 1:
-        if len(parents) > 1:
-            logger.warning("Payer %s matched multiple parent profiles, cannot auto-match receipt", payer_name)
-        return None
+    matched_child_ids: set[int] = set()
 
-    parent = parents[0]
-
-    # Берём ребёнка этого родителя
-    pc_result = await db.execute(
-        select(ParentChild).where(ParentChild.parent_id == parent.id)
-    )
-    children = pc_result.scalars().all()
-
-    if len(children) == 1:
-        return children[0].child_id
-
-    # Если детей несколько — логируем, не угадываем
-    if len(children) > 1:
-        logger.warning(
-            "Parent %s has %d children, cannot auto-match receipt",
-            payer_name, len(children)
+    for parent in parents:
+        pc_result = await db.execute(
+            select(ParentChild).where(ParentChild.parent_id == parent.id)
         )
+        children = pc_result.scalars().all()
+        if len(children) == 1:
+            matched_child_ids.add(children[0].child_id)
+        elif len(children) > 1:
+            logger.warning(
+                "Parent %s has %d children, cannot auto-match by parent alone",
+                payer_name, len(children)
+            )
+
+    child_result = await db.execute(
+        select(ChildProfile)
+        .join(ChildProfile.user)
+        .where(User.role == RoleEnum.child, User.is_active == True)
+    )
+    for child in child_result.scalars().unique().all():
+        if child.user and _same_person(payer_name, _full_name(child.user)):
+            matched_child_ids.add(child.id)
+
+    if len(matched_child_ids) == 1:
+        return next(iter(matched_child_ids))
+    if len(matched_child_ids) > 1:
+        logger.warning("Payer %s matched multiple children %s, cannot auto-match receipt", payer_name, sorted(matched_child_ids))
     return None
 
 

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date as DateType, datetime, time as TimeType
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.models.models import RoleEnum, LessonStatus, RequestStatus
@@ -167,9 +167,9 @@ class LessonCreate(BaseModel):
     tutor_id: int
     child_id: int
     subject_id: int
-    date: date
-    time_start: time
-    time_end: time
+    date: DateType
+    time_start: TimeType
+    time_end: TimeType
     is_free_trial: bool = False
     notes: Optional[str] = None
 
@@ -178,9 +178,9 @@ class LessonUpdate(BaseModel):
     tutor_id: Optional[int] = None
     child_id: Optional[int] = None
     subject_id: Optional[int] = None
-    date: Optional[date] = None
-    time_start: Optional[time] = None
-    time_end: Optional[time] = None
+    date: Optional[DateType] = None
+    time_start: Optional[TimeType] = None
+    time_end: Optional[TimeType] = None
     status: Optional[LessonStatus] = None
     cancel_reason: Optional[str] = None
     notes: Optional[str] = None
@@ -195,9 +195,9 @@ class LessonOut(BaseModel):
     student_name: Optional[str] = "Ученик"
     tutor_name: Optional[str] = "Репетитор"
     subject_name: Optional[str] = "Предмет"
-    date: date
-    time_start: time
-    time_end: time
+    date: DateType
+    time_start: TimeType
+    time_end: TimeType
     status: LessonStatus
     cancel_reason: Optional[str] = None
     notes: Optional[str] = None
@@ -293,8 +293,8 @@ class PaymentCreate(BaseModel):
     child_id: int
     amount: float
     description: Optional[str] = None
-    period_start: Optional[date] = None
-    period_end: Optional[date] = None
+    period_start: Optional[DateType] = None
+    period_end: Optional[DateType] = None
 
 
 class PaymentOut(BaseModel):
@@ -305,8 +305,8 @@ class PaymentOut(BaseModel):
     description: Optional[str] = None
     is_paid: bool
     paid_at: Optional[datetime] = None
-    period_start: Optional[date] = None
-    period_end: Optional[date] = None
+    period_start: Optional[DateType] = None
+    period_end: Optional[DateType] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -510,8 +510,8 @@ class CommentOut(BaseModel):
 class ActOut(BaseModel):
     id: int
     tutor_id: int
-    period_start: date
-    period_end: date
+    period_start: DateType
+    period_end: DateType
     lessons_count: int
     total_amount: float
     blank_url: Optional[str] = None
