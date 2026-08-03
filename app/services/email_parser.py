@@ -41,13 +41,23 @@ def _same_person(payer_name: str, stored_name: str) -> bool:
     stored = _name_tokens(stored_name)
     if len(payer) < 2 or len(stored) < 2:
         return False
-    if "родитель" in stored[2:]:
+    if "родитель" in stored:
         return False
-    if payer[0] != stored[0] or payer[1] != stored[1]:
+    if set(payer[:2]) != set(stored[:2]):
         return False
     if len(stored) >= 3 and len(payer) >= 3 and payer[2] != stored[2]:
         return False
     return True
+
+
+def _single_token_owner(payer_name: str, stored_name: str) -> bool:
+    payer = _name_tokens(payer_name)
+    stored = _name_tokens(stored_name)
+    if len(payer) != 1 or len(stored) < 2:
+        return False
+    if "родитель" in stored:
+        return False
+    return payer[0] in set(stored[:2])
 
 
 def _full_name(user) -> str:
@@ -181,52 +191,40 @@ def _fetch_raw_receipts() -> List[Dict]:
 
 async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Optional[int]:
     """
-    Strict matching only:
-    1. payer full name == parent full name -> linked child
-    2. payer full name == child full name -> that child
-
-    We intentionally do not match by surname-only or partial stems: that caused
-    wrong links between different people with similar names.
+    Safe matching:
+    1. full payer name equals parent/child name, allowing both "Имя Фамилия"
+       and "Фамилия Имя Отчество" order;
+    2. a one-word payer name is accepted only if it points to exactly one child
+       through the linked parent/child CRM names.
     """
+    from sqlalchemy.orm import joinedload
     from app.models.models import User, ParentProfile, ParentChild, ChildProfile, RoleEnum
-
-    parts = _name_tokens(payer_name)
-    if len(parts) < 2:
-        return None
-
-    result = await db.execute(
-        select(ParentProfile)
-        .join(ParentProfile.user)
-        .where(User.role == RoleEnum.parent, User.is_active == True)
-    )
-    parents = [
-        parent
-        for parent in result.scalars().unique().all()
-        if parent.user and _same_person(payer_name, _full_name(parent.user))
-    ]
 
     matched_child_ids: set[int] = set()
 
-    for parent in parents:
-        pc_result = await db.execute(
-            select(ParentChild).where(ParentChild.parent_id == parent.id)
-        )
-        children = pc_result.scalars().all()
-        if len(children) == 1:
-            matched_child_ids.add(children[0].child_id)
-        elif len(children) > 1:
-            logger.warning(
-                "Parent %s has %d children, cannot auto-match by parent alone",
-                payer_name, len(children)
-            )
-
-    child_result = await db.execute(
+    result = await db.execute(
         select(ChildProfile)
+        .options(
+            joinedload(ChildProfile.user),
+            joinedload(ChildProfile.parents)
+            .joinedload(ParentChild.parent)
+            .joinedload(ParentProfile.user),
+        )
         .join(ChildProfile.user)
         .where(User.role == RoleEnum.child, User.is_active == True)
     )
-    for child in child_result.scalars().unique().all():
-        if child.user and _same_person(payer_name, _full_name(child.user)):
+
+    for child in result.scalars().unique().all():
+        names = [_full_name(child.user)]
+        names.extend(
+            _full_name(link.parent.user)
+            for link in child.parents
+            if link.parent and link.parent.user
+        )
+        if any(
+            _same_person(payer_name, name) or _single_token_owner(payer_name, name)
+            for name in names
+        ):
             matched_child_ids.add(child.id)
 
     if len(matched_child_ids) == 1:
