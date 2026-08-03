@@ -190,10 +190,6 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
         parent = result.scalar_one_or_none()
 
     if parent is None:
-        logger.warning(
-            "Payer '%s' has no exact linked parent profile, cannot auto-match receipt",
-            payer_name,
-        )
         return None
 
     # Берём ребёнка этого родителя
