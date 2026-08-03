@@ -96,7 +96,7 @@ async def lifespan(app: FastAPI):
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS tutors_text TEXT",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS contract_label VARCHAR(100)",
                     "DELETE FROM invite_codes WHERE description IS NOT NULL AND (length(description) > 120 OR description !~ '^[A-Za-zА-Яа-яЁёЎўІіЇїЄє0-9 .''-]{0,120}$')",
-                    "UPDATE email_receipts er SET child_id = NULL WHERE er.child_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM parent_child pc JOIN parent_profiles pp ON pp.id = pc.parent_id JOIN users u ON u.id = pp.user_id WHERE pc.child_id = er.child_id AND lower(er.payer_name) LIKE lower(trim(concat_ws(' ', u.last_name, u.first_name)) || '%'))",
+                    "UPDATE email_receipts er SET child_id = NULL WHERE er.child_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM parent_children pc JOIN parent_profiles pp ON pp.id = pc.parent_id JOIN users u ON u.id = pp.user_id WHERE pc.child_id = er.child_id AND lower(er.payer_name) LIKE lower(trim(concat_ws(' ', u.last_name, u.first_name)) || '%'))",
                     "ALTER TABLE tutor_contracts ADD COLUMN IF NOT EXISTS signed_file_url VARCHAR(500)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS lesson_id INTEGER REFERENCES lessons(id)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS material_score INTEGER",
