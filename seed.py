@@ -18,6 +18,7 @@ SUBJECTS = [
     {"name": "Химия", "slug": "himiya", "icon": "🧪"},
     {"name": "Русский язык", "slug": "russkiy", "icon": "📝"},
     {"name": "Английский язык", "slug": "angliyskiy", "icon": "🇬🇧"},
+    {"name": "Белорусский язык", "slug": "belorusskiy", "icon": "📝"},
     {"name": "Биология", "slug": "biologiya", "icon": "🌿"},
     {"name": "История", "slug": "istoriya", "icon": "📚"},
     {"name": "Информатика", "slug": "informatika", "icon": "💻"},

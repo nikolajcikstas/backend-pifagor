@@ -62,6 +62,8 @@ async def lifespan(app: FastAPI):
                     ("Математика", "matematika"),
                     ("Физика", "fizika"),
                     ("Английский язык", "angliyskiy"),
+                    ("Русский язык", "russkiy"),
+                    ("Белорусский язык", "belorusskiy"),
                     ("Биология", "biologiya"),
                     ("Химия", "himiya"),
                 ):
