@@ -27,6 +27,7 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter()
+MAX_INVITE_DESCRIPTION_LENGTH = 120
 
 
 # Pydantic схема для ручного бинда
@@ -67,6 +68,32 @@ def _split_name(raw: str | None) -> tuple[str, str]:
     if len(parts) >= 2:
         return parts[1], parts[0]
     return parts[0] if parts else "Новый", "ученик"
+
+
+def _clean_invite_description(description: Optional[str]) -> Optional[str]:
+    if description is None:
+        return None
+    clean = description.strip()
+    if len(clean) > MAX_INVITE_DESCRIPTION_LENGTH:
+        raise HTTPException(status_code=400, detail="Описание кода слишком длинное")
+    return clean or None
+
+
+def _is_suspicious_invite_description(description: Optional[str]) -> bool:
+    if not description:
+        return False
+    clean = description.strip()
+    if len(clean) > MAX_INVITE_DESCRIPTION_LENGTH:
+        return True
+    allowed_punctuation = {" ", "-", "'", ".", "ё", "Ё"}
+    suspicious = 0
+    for ch in clean:
+        code = ord(ch)
+        is_latin = 0x0041 <= code <= 0x007A
+        is_cyrillic = 0x0400 <= code <= 0x052F
+        if not (ch.isdigit() or is_latin or is_cyrillic or ch in allowed_punctuation):
+            suspicious += 1
+    return suspicious > max(3, len(clean) // 5)
 
 
 async def _delete_invite_codes_for_user(db: AsyncSession, user_id: int) -> int:
@@ -126,13 +153,14 @@ async def _delete_invite_codes_for_descriptions(db: AsyncSession, descriptions: 
     return len(codes)
 
 
-@router.post("/invite-codes", response_model=List[InviteCodeResponse])
+@router.post("/invite-codes", response_model=List[InviteCodeResponse], dependencies=[Depends(require_admin)])
 async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depends(get_db)):
     role_str = str(payload.role).strip().lower()
+    description = _clean_invite_description(payload.description)
 
     if role_str in ["pair", "student_parent"]:
         child_code = generate_random_code("CHD")
-        child_invite = InviteCode(role=RoleEnum.child, code=child_code, description=payload.description)
+        child_invite = InviteCode(role=RoleEnum.child, code=child_code, description=description)
         db.add(child_invite)
         await db.flush()
 
@@ -140,12 +168,12 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
         parent_invite = InviteCode(
             role=RoleEnum.parent,
             code=parent_code,
-            description=payload.description,
+            description=description,
             linked_code_id=child_invite.id
         )
         db.add(parent_invite)
 
-        first_name, last_name = _split_name(payload.description)
+        first_name, last_name = _split_name(description)
         placeholder_password = get_password_hash(secrets.token_urlsafe(24))
 
         child_user = User(
@@ -185,7 +213,7 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
 
     if role_str == "tutor":
         code_str = generate_random_code("TUT")
-        invite = InviteCode(role=RoleEnum.tutor, code=code_str, description=payload.description)
+        invite = InviteCode(role=RoleEnum.tutor, code=code_str, description=description)
         db.add(invite)
         await db.commit()
         return [invite]
@@ -193,7 +221,7 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
     raise HTTPException(status_code=400, detail=f"Неверная роль для генерации кода: {payload.role}")
 
 
-@router.get("/invite-codes", response_model=List[InviteCodeResponse])
+@router.get("/invite-codes", response_model=List[InviteCodeResponse], dependencies=[Depends(require_admin)])
 async def list_invite_codes(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(InviteCode).order_by(InviteCode.created_at.desc()))
     codes = result.scalars().all()
@@ -215,6 +243,8 @@ async def list_invite_codes(db: AsyncSession = Depends(get_db)):
     visible = []
     for code in codes:
         description = (code.description or "").strip()
+        if _is_suspicious_invite_description(description):
+            continue
         if code.role in (RoleEnum.child, RoleEnum.parent) and description:
             if description not in active_child_names:
                 continue

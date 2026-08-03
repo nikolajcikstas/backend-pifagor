@@ -1,10 +1,14 @@
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from collections import defaultdict, deque
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -13,6 +17,51 @@ from app.api.v1.endpoints import admin
 from app.db.session import engine, Base
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "https://pifagor.by,https://www.pifagor.by,http://localhost:5173,http://localhost:5174",
+    ).split(",")
+    if origin.strip()
+]
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        return response
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    _hits: dict[tuple[str, str, str], deque[float]] = defaultdict(deque)
+    _limits = {
+        ("POST", "/api/v1/auth/login"): (20, 60),
+        ("POST", "/api/v1/auth/register"): (10, 300),
+        ("GET", "/api/v1/auth/invite-codes/validate"): (30, 60),
+        ("POST", "/api/v1/requests"): (15, 300),
+    }
+
+    async def dispatch(self, request: Request, call_next):
+        key = (request.method, request.url.path)
+        limit = self._limits.get(key)
+        if limit:
+            max_hits, window_seconds = limit
+            client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown").split(",")[0].strip()
+            bucket_key = (request.method, request.url.path, client_ip)
+            now = time.monotonic()
+            hits = self._hits[bucket_key]
+            while hits and now - hits[0] > window_seconds:
+                hits.popleft()
+            if len(hits) >= max_hits:
+                return JSONResponse({"detail": "Слишком много запросов, попробуйте позже"}, status_code=429)
+            hits.append(now)
+        return await call_next(request)
 
 
 async def _daily_email_task():
@@ -46,6 +95,8 @@ async def lifespan(app: FastAPI):
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS subjects_text TEXT",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS tutors_text TEXT",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS contract_label VARCHAR(100)",
+                    "DELETE FROM invite_codes WHERE description IS NOT NULL AND (length(description) > 120 OR description !~ '^[A-Za-zА-Яа-яЁёЎўІіЇїЄє0-9 .''-]{0,120}$')",
+                    "UPDATE email_receipts er SET child_id = NULL WHERE er.child_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM parent_child pc JOIN parent_profiles pp ON pp.id = pc.parent_id JOIN users u ON u.id = pp.user_id WHERE pc.child_id = er.child_id AND lower(er.payer_name) LIKE lower(trim(concat_ws(' ', u.last_name, u.first_name)) || '%'))",
                     "ALTER TABLE tutor_contracts ADD COLUMN IF NOT EXISTS signed_file_url VARCHAR(500)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS lesson_id INTEGER REFERENCES lessons(id)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS material_score INTEGER",
@@ -91,9 +142,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Пифагор API", version="1.0.0", lifespan=lifespan)
 
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

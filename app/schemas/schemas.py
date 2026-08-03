@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 from typing import List, Optional
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.models.models import RoleEnum, LessonStatus, RequestStatus
 
 
@@ -8,7 +8,7 @@ from app.models.models import RoleEnum, LessonStatus, RequestStatus
 
 class InviteCodeCreate(BaseModel):
     role: str  # Принимает "tutor" или "pair" (для пары ученик+родитель)
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=120)
 
 
 class InviteCodeResponse(BaseModel):
