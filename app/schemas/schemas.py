@@ -62,6 +62,12 @@ class UserUpdate(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class CredentialsUpdate(BaseModel):
+    current_password: str
+    email: Optional[EmailStr] = None
+    new_password: Optional[str] = Field(default=None, min_length=8, max_length=128)
+
+
 class ProfileBasicOut(BaseModel):
     id: int
     lesson_price: Optional[float] = None

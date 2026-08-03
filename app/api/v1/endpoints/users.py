@@ -6,8 +6,9 @@ from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.models.models import User, TutorProfile, RoleEnum
-from app.schemas.schemas import UserOut, UserOutWithProfiles, UserUpdate, TutorProfileOut, TutorProfileUpdate, UserMeOut
+from app.schemas.schemas import CredentialsUpdate, UserOut, UserOutWithProfiles, UserUpdate, TutorProfileOut, TutorProfileUpdate, UserMeOut
 from app.core.deps import get_current_user, require_admin
+from app.core.security import get_password_hash, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -25,6 +26,29 @@ async def update_me(
 ):
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(current_user, field, value)
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
+
+
+@router.patch("/me/credentials", response_model=UserOut)
+async def update_my_credentials(
+    data: CredentialsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not verify_password(data.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Текущий пароль неверный")
+
+    if data.email and data.email != current_user.email:
+        existing = await db.scalar(select(User).where(User.email == data.email, User.id != current_user.id))
+        if existing:
+            raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
+        current_user.email = data.email
+
+    if data.new_password:
+        current_user.hashed_password = get_password_hash(data.new_password)
+
     await db.commit()
     await db.refresh(current_user)
     return current_user

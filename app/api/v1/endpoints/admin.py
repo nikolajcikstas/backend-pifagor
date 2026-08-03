@@ -83,6 +83,8 @@ def _is_suspicious_invite_description(description: Optional[str]) -> bool:
     if not description:
         return False
     clean = description.strip()
+    if "admin" in clean.lower() or "админ" in clean.lower():
+        return True
     if len(clean) > MAX_INVITE_DESCRIPTION_LENGTH:
         return True
     allowed_punctuation = {" ", "-", "'", ".", "ё", "Ё"}
