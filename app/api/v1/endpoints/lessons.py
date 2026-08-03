@@ -20,6 +20,7 @@ from app.models.models import (
     Subject,
     TutorProfile,
     User,
+    Homework,
 )
 from app.schemas.schemas import LessonCreate, LessonUpdate
 
@@ -314,9 +315,9 @@ async def update_lesson(
 
     updates = data.model_dump(exclude_none=True)
     if current_user.role != RoleEnum.admin:
-        for protected_field in ("tutor_id", "child_id", "subject_id"):
+        for protected_field in ("tutor_id", "child_id"):
             if protected_field in updates:
-                raise HTTPException(status_code=403, detail="Only admin can change lesson participants and subject")
+                raise HTTPException(status_code=403, detail="Only admin can change lesson participants")
 
     if "tutor_id" in updates and not await db.scalar(select(TutorProfile.id).where(TutorProfile.id == updates["tutor_id"])):
         raise HTTPException(status_code=422, detail=f"Tutor profile id={updates['tutor_id']} not found")
@@ -381,6 +382,14 @@ async def delete_lesson(
         await _notify(db, lesson.tutor.user_id if lesson.tutor else None, "Занятие удалено", f"Администратор удалил занятие с учеником {student_name}.")
     else:
         await _notify_admins(db, "Занятие удалено", f"{_user_name(current_user)} удалил занятие с учеником {student_name}.")
+
+    homework_result = await db.execute(select(Homework).where(Homework.lesson_id == lesson.id))
+    for homework in homework_result.scalars().all():
+        await db.delete(homework)
+
+    report_result = await db.execute(select(Report).where(Report.lesson_id == lesson.id))
+    for report in report_result.scalars().all():
+        report.lesson_id = None
 
     await db.delete(lesson)
     await db.commit()
