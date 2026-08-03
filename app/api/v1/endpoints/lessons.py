@@ -17,6 +17,7 @@ from app.models.models import (
     ParentProfile,
     Report,
     RoleEnum,
+    Subject,
     TutorProfile,
     User,
 )
@@ -312,6 +313,18 @@ async def update_lesson(
         raise HTTPException(status_code=403, detail="Недостаточно прав")
 
     updates = data.model_dump(exclude_none=True)
+    if current_user.role != RoleEnum.admin:
+        for protected_field in ("tutor_id", "child_id", "subject_id"):
+            if protected_field in updates:
+                raise HTTPException(status_code=403, detail="Only admin can change lesson participants and subject")
+
+    if "tutor_id" in updates and not await db.scalar(select(TutorProfile.id).where(TutorProfile.id == updates["tutor_id"])):
+        raise HTTPException(status_code=422, detail=f"Tutor profile id={updates['tutor_id']} not found")
+    if "child_id" in updates and not await db.scalar(select(ChildProfile.id).where(ChildProfile.id == updates["child_id"])):
+        raise HTTPException(status_code=422, detail=f"Child profile id={updates['child_id']} not found")
+    if "subject_id" in updates and not await db.scalar(select(Subject.id).where(Subject.id == updates["subject_id"])):
+        raise HTTPException(status_code=422, detail=f"Subject id={updates['subject_id']} not found")
+
     if updates.get("status") == LessonStatus.completed and lesson.status != LessonStatus.completed:
         await _require_report_for_fifth_lesson(db, lesson)
 

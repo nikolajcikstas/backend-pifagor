@@ -25,6 +25,38 @@ LESSON_PRICE = float(os.getenv("LESSON_PRICE", "40"))
 IMAP_TIMEOUT = 15
 
 
+def _normalize_name(value: str | None) -> str:
+    value = (value or "").lower().replace("ё", "е")
+    value = re.sub(r"[^a-zа-я0-9\s-]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _name_tokens(value: str | None) -> list[str]:
+    return [part for part in _normalize_name(value).replace("-", " ").split() if part]
+
+
+def _same_person(payer_name: str, stored_name: str) -> bool:
+    payer = _name_tokens(payer_name)
+    stored = _name_tokens(stored_name)
+    if len(payer) < 2 or len(stored) < 2:
+        return False
+    if "родитель" in stored[2:]:
+        return False
+    if payer[0] != stored[0] or payer[1] != stored[1]:
+        return False
+    if len(stored) >= 3 and len(payer) >= 3 and payer[2] != stored[2]:
+        return False
+    return True
+
+
+def _full_name(user) -> str:
+    if not user:
+        return ""
+    parts = [user.last_name, user.first_name, user.middle_name]
+    return " ".join(part for part in parts if part).strip()
+
+
 def _get_email_body(msg) -> str:
     body = ""
     if msg.is_multipart():
@@ -156,41 +188,27 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
     """
     from app.models.models import User, ParentProfile, ParentChild, RoleEnum
 
-    parts = payer_name.strip().split()
+    parts = _name_tokens(payer_name)
     if len(parts) < 2:
         return None
 
-    last_name = parts[0]
-    first_name = parts[1]
-
-    # Ищем родителя по фамилии и имени
     result = await db.execute(
         select(ParentProfile)
         .join(ParentProfile.user)
-        .where(
-            User.role == RoleEnum.parent,
-            User.last_name.ilike(last_name),
-            User.first_name.ilike(first_name),
-        )
+        .where(User.role == RoleEnum.parent, User.is_active == True)
     )
-    parent = result.scalar_one_or_none()
+    parents = [
+        parent
+        for parent in result.scalars().unique().all()
+        if parent.user and _same_person(payer_name, _full_name(parent.user))
+    ]
 
-    if parent is None:
-        # Мягкий поиск — фамилия без последней буквы (падежи)
-        last_stem = last_name[:-1] if len(last_name) > 3 else last_name
-        result = await db.execute(
-            select(ParentProfile)
-            .join(ParentProfile.user)
-            .where(
-                User.role == RoleEnum.parent,
-                User.last_name.ilike(f"{last_stem}%"),
-                User.first_name.ilike(first_name),
-            )
-        )
-        parent = result.scalar_one_or_none()
-
-    if parent is None:
+    if len(parents) != 1:
+        if len(parents) > 1:
+            logger.warning("Payer %s matched multiple parent profiles, cannot auto-match receipt", payer_name)
         return None
+
+    parent = parents[0]
 
     # Берём ребёнка этого родителя
     pc_result = await db.execute(
@@ -213,18 +231,17 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
 async def rematch_unlinked_receipts(db: AsyncSession) -> int:
     from app.models.models import EmailReceipt
 
-    result = await db.execute(
-        select(EmailReceipt).where(EmailReceipt.child_id.is_(None))
-    )
+    result = await db.execute(select(EmailReceipt))
     receipts = result.scalars().all()
     matched = 0
 
     for receipt in receipts:
         child_id = await _find_child_by_payer_name(receipt.payer_name, db)
-        if child_id is None:
+        if receipt.child_id == child_id:
             continue
         receipt.child_id = child_id
-        matched += 1
+        if child_id is not None:
+            matched += 1
 
     if matched:
         await db.commit()

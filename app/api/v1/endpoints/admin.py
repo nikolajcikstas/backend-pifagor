@@ -436,6 +436,16 @@ async def update_admin_student(
     if payload.contract_label is not None:
         student.child_profile.contract_label = payload.contract_label.strip() or None
 
+    should_rematch_receipts = any(
+        value is not None
+        for value in (
+            payload.first_name,
+            payload.last_name,
+            payload.parent_name,
+            payload.parent_phone,
+        )
+    )
+
     parent_user = None
     for link in student.child_profile.parents:
         if link.parent and link.parent.user:
@@ -450,6 +460,10 @@ async def update_admin_student(
             parent_user.phone = payload.parent_phone.strip() or None
 
     await db.commit()
+    if should_rematch_receipts:
+        from app.services.email_parser import rematch_unlinked_receipts
+
+        await rematch_unlinked_receipts(db)
     return {
         "ok": True,
         "lesson_price": student.child_profile.lesson_price,

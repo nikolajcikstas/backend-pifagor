@@ -175,12 +175,16 @@ class LessonCreate(BaseModel):
 
 
 class LessonUpdate(BaseModel):
+    tutor_id: Optional[int] = None
+    child_id: Optional[int] = None
+    subject_id: Optional[int] = None
     date: Optional[date] = None
     time_start: Optional[time] = None
     time_end: Optional[time] = None
     status: Optional[LessonStatus] = None
     cancel_reason: Optional[str] = None
     notes: Optional[str] = None
+    is_free_trial: Optional[bool] = None
 
 
 class LessonOut(BaseModel):
