@@ -36,6 +36,45 @@ def _name_tokens(value: str | None) -> list[str]:
     return [part for part in _normalize_name(value).replace("-", " ").split() if part]
 
 
+def _edit_distance_limited(left: str, right: str, limit: int = 1) -> int:
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        row_min = i
+        for j, right_char in enumerate(right, 1):
+            cost = 0 if left_char == right_char else 1
+            value = min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + cost,
+            )
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def _token_close(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 5:
+        return False
+    return _edit_distance_limited(left, right, 1) <= 1
+
+
+def _main_name_tokens_match(payer: list[str], stored: list[str]) -> bool:
+    payer_main = payer[:2]
+    stored_main = stored[:2]
+    return (
+        (_token_close(payer_main[0], stored_main[0]) and _token_close(payer_main[1], stored_main[1]))
+        or (_token_close(payer_main[0], stored_main[1]) and _token_close(payer_main[1], stored_main[0]))
+    )
+
+
 def _same_person(payer_name: str, stored_name: str) -> bool:
     payer = _name_tokens(payer_name)
     stored = _name_tokens(stored_name)
@@ -43,7 +82,7 @@ def _same_person(payer_name: str, stored_name: str) -> bool:
         return False
     if "родитель" in stored:
         return False
-    if set(payer[:2]) != set(stored[:2]):
+    if not _main_name_tokens_match(payer, stored):
         return False
     if len(stored) >= 3 and len(payer) >= 3 and payer[2] != stored[2]:
         return False

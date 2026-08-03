@@ -323,33 +323,33 @@ async def finance_report(
         week_start: Optional[date] = Query(None),
         db: AsyncSession = Depends(get_db),
 ):
-    """Weekly finance report per student."""
-    if week_start is None:
-        today = date.today()
-        week_start = today - timedelta(days=today.weekday())
+    """Finance report per student. If week_start is provided, limit it to that week."""
+    week_end = week_start + timedelta(days=6) if week_start else None
+    lesson_filters = [Lesson.status == LessonStatus.completed]
+    receipt_filters = [EmailReceipt.child_id.isnot(None)]
 
-    week_end = week_start + timedelta(days=6)
-
-    # Completed lessons in the week
-    lessons_res = await db.execute(
-        select(Lesson.child_id, func.count(Lesson.id).label("cnt"))
-        .where(
-            Lesson.status == LessonStatus.completed,
+    if week_start and week_end:
+        lesson_filters.extend([
             Lesson.date >= week_start,
             Lesson.date <= week_end,
-        )
+        ])
+        receipt_filters.extend([
+            cast(EmailReceipt.payment_date, Date) >= week_start,
+            cast(EmailReceipt.payment_date, Date) <= week_end,
+        ])
+
+    # Completed lessons in the selected range.
+    lessons_res = await db.execute(
+        select(Lesson.child_id, func.count(Lesson.id).label("cnt"))
+        .where(*lesson_filters)
         .group_by(Lesson.child_id)
     )
     lessons_by_child = {row.child_id: row.cnt for row in lessons_res}
 
-    # Paid receipts in the week (cast datetime to date for correct comparison)
+    # Paid receipts in the selected range.
     receipts_res = await db.execute(
         select(EmailReceipt.child_id, func.sum(EmailReceipt.amount).label("total"))
-        .where(
-            EmailReceipt.child_id.isnot(None),
-            cast(EmailReceipt.payment_date, Date) >= week_start,
-            cast(EmailReceipt.payment_date, Date) <= week_end,
-        )
+        .where(*receipt_filters)
         .group_by(EmailReceipt.child_id)
     )
     amounts_by_child = {row.child_id: row.total for row in receipts_res}
