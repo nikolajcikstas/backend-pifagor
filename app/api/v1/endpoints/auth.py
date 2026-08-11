@@ -59,11 +59,12 @@ async def validate_invite_code(code: str, db: AsyncSession = Depends(get_db)):
     invite = await db.scalar(select(InviteCode).where(InviteCode.code == code))
     if not invite or invite.is_used:
         raise HTTPException(status_code=404, detail="Код не найден или уже использован")
+    # Minimal public payload: avoid leaking internal notes beyond registration UX.
     return {
         "code": invite.code,
         "role": invite.role,
-        "description": invite.description,
-        "is_used": invite.is_used,
+        "description": (invite.description or "")[:120] or None,
+        "is_used": False,
     }
 
 
