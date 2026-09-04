@@ -87,6 +87,29 @@ async def _daily_email_task():
         await asyncio.sleep(86400)
 
 
+async def _weekly_contract_recalc_task():
+    """Каждое воскресенье пересчитывает рекомендации по всем привязанным
+    к ученику договорам (сравнивает график платежей с фактически проведёнными
+    занятиями)."""
+    from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+    from app.db.session import async_session_maker
+    from app.api.v1.endpoints.admin import recalculate_all_contracts
+
+    while True:
+        now = _datetime.utcnow()
+        days_until_sunday = (6 - now.weekday()) % 7
+        next_run = _datetime.combine(now.date(), _datetime.min.time()) + _timedelta(days=days_until_sunday, hours=6)
+        if next_run <= now:
+            next_run += _timedelta(days=7)
+        await asyncio.sleep((next_run - now).total_seconds())
+        try:
+            async with async_session_maker() as db:
+                updated = await recalculate_all_contracts(db, _date.today())
+                logger.info("Weekly contract recalculation done: %s contracts updated", updated)
+        except Exception as e:
+            logger.error("Weekly contract recalculation failed: %s", e)
+
+
 async def _init_database_schema() -> None:
     """Best-effort schema bootstrap. Never crash the process on transient DB issues."""
     logger.info("Starting database schema initialization")
@@ -122,6 +145,24 @@ async def _init_database_schema() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_lessons_status ON lessons (status)",
                     "CREATE INDEX IF NOT EXISTS ix_users_first_name ON users (first_name)",
                     "CREATE INDEX IF NOT EXISTS ix_users_last_name ON users (last_name)",
+                    "ALTER TABLE parent_contracts ALTER COLUMN parent_id DROP NOT NULL",
+                    "ALTER TABLE parent_contracts ALTER COLUMN child_id DROP NOT NULL",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS contract_number VARCHAR(50)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS client_name_raw VARCHAR(300)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS start_date DATE",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS end_date DATE",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS total_amount DOUBLE PRECISION",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS parent_full_name VARCHAR(300)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS parent_phone VARCHAR(50)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS parent_email VARCHAR(200)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS city VARCHAR(200)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS street VARCHAR(200)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS house VARCHAR(50)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS payments_json TEXT",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS match_status VARCHAR(20) NOT NULL DEFAULT 'unmatched'",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT false",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS recommendation TEXT",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS recommendation_as_of DATE",
                 ):
                     try:
                         await conn.execute(text(sql))
@@ -161,10 +202,16 @@ async def _init_database_schema() -> None:
 async def lifespan(app: FastAPI):
     await _init_database_schema()
     task = asyncio.create_task(_daily_email_task())
+    contract_task = asyncio.create_task(_weekly_contract_recalc_task())
     yield
     task.cancel()
+    contract_task.cancel()
     try:
         await task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await contract_task
     except asyncio.CancelledError:
         pass
 

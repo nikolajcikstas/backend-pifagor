@@ -279,15 +279,33 @@ class ParentContract(Base):
     __tablename__ = "parent_contracts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_profiles.id"))
-    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    parent_id: Mapped[Optional[int]] = mapped_column(ForeignKey("parent_profiles.id"), nullable=True)
+    child_id: Mapped[Optional[int]] = mapped_column(ForeignKey("child_profiles.id"), nullable=True)
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
     signed_file_url: Mapped[Optional[str]] = mapped_column(String(500))
     is_signed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-    parent: Mapped["ParentProfile"] = relationship(back_populates="contracts")
-    child: Mapped["ChildProfile"] = relationship()
+    # ── Распознанные из текста договора данные ──
+    contract_number: Mapped[Optional[str]] = mapped_column(String(50))
+    client_name_raw: Mapped[Optional[str]] = mapped_column(String(300))
+    start_date: Mapped[Optional[date]] = mapped_column(Date)
+    end_date: Mapped[Optional[date]] = mapped_column(Date)
+    total_amount: Mapped[Optional[float]] = mapped_column(Float)
+    parent_full_name: Mapped[Optional[str]] = mapped_column(String(300))
+    parent_phone: Mapped[Optional[str]] = mapped_column(String(50))
+    parent_email: Mapped[Optional[str]] = mapped_column(String(200))
+    city: Mapped[Optional[str]] = mapped_column(String(200))
+    street: Mapped[Optional[str]] = mapped_column(String(200))
+    house: Mapped[Optional[str]] = mapped_column(String(50))
+    payments_json: Mapped[Optional[str]] = mapped_column(Text)
+    match_status: Mapped[str] = mapped_column(String(20), default="unmatched", server_default="unmatched")
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    recommendation: Mapped[Optional[str]] = mapped_column(Text)
+    recommendation_as_of: Mapped[Optional[date]] = mapped_column(Date)
+
+    parent: Mapped[Optional["ParentProfile"]] = relationship(back_populates="contracts")
+    child: Mapped[Optional["ChildProfile"]] = relationship()
 
 
 # ─── Payments ─────────────────────────────────────────────────────────────────

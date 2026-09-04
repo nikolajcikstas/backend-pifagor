@@ -1,8 +1,11 @@
 import secrets
+import json
+import uuid
+from pathlib import Path
 from typing import List, Optional
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, cast, Date, or_
@@ -12,6 +15,8 @@ from pydantic import BaseModel  # 🌟 Добавили для Pydantic схем
 from app.db.session import get_db
 from app.core.deps import require_admin
 from app.core.security import get_password_hash
+from app.services.contract_parser import parse_contract_docx
+from app.services.email_parser import _find_child_by_payer_name
 from app.models.models import (
     InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
@@ -552,6 +557,255 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
     return rows
 
 
+def _serialize_contract(contract: ParentContract) -> dict:
+    parent_user = contract.parent.user if contract.parent else None
+    child_user = contract.child.user if contract.child else None
+    return {
+        "id": f"parent-{contract.id}",
+        "db_id": contract.id,
+        "number": contract.contract_number or f"P-{contract.id:04d}",
+        "type": "Родитель",
+        "status": "Действующий" if contract.is_signed else "Ожидает подписи",
+        "match_status": contract.match_status,
+        "needs_review": contract.needs_review,
+        "start_date": contract.start_date.isoformat() if contract.start_date else None,
+        "end_date": contract.end_date.isoformat() if contract.end_date else None,
+        "parent_full_name": contract.parent_full_name or (
+            f"{parent_user.last_name} {parent_user.first_name}".strip() if parent_user else ""
+        ),
+        "parent_phone": contract.parent_phone or (parent_user.phone if parent_user else ""),
+        "city": contract.city or "",
+        "street": contract.street or "",
+        "house": contract.house or "",
+        "email": contract.parent_email or (parent_user.email if parent_user else ""),
+        "recommendation": contract.recommendation,
+        "recommendation_as_of": contract.recommendation_as_of.isoformat() if contract.recommendation_as_of else None,
+        "student_name": f"{child_user.last_name} {child_user.first_name}".strip() if child_user else "",
+        "child_id": contract.child_id,
+        "total_amount": contract.total_amount,
+        "file_url": contract.signed_file_url or contract.file_url,
+    }
+
+
+async def _compute_recommendation(
+    db: AsyncSession, contract: ParentContract, as_of: date
+) -> Optional[str]:
+    """Сравнивает, сколько занятий должно было пройти согласно графику
+    платежей на дату as_of, с тем, сколько реально проведено."""
+    if not contract.payments_json or not contract.child_id:
+        return None
+
+    payments = json.loads(contract.payments_json)
+    due_payments = [
+        p for p in payments
+        if date.fromisoformat(p["due_date"]) <= as_of
+    ]
+    if not due_payments:
+        return None  # ещё нет ни одного срока платежа — договор не исследуется
+
+    total_due = round(sum(p["amount"] for p in due_payments), 2)
+
+    child_res = await db.execute(select(ChildProfile).where(ChildProfile.id == contract.child_id))
+    child = child_res.scalar_one_or_none()
+    if not child or not child.lesson_price:
+        return None
+
+    a = int(total_due // child.lesson_price)
+
+    count_res = await db.execute(
+        select(func.count(Lesson.id)).where(
+            Lesson.child_id == contract.child_id,
+            Lesson.status == LessonStatus.completed,
+            Lesson.date <= as_of,
+        )
+    )
+    b = count_res.scalar() or 0
+
+    if a > b:
+        return f"Отработать {a - b} занятий (на {as_of.isoformat()})"
+    if b > a:
+        return f"Проведено на {b - a} занятий больше (на {as_of.isoformat()})"
+    return f"Соответствует графику оплат (на {as_of.isoformat()})"
+
+
+@router.post("/contracts/upload", dependencies=[Depends(require_admin)])
+async def upload_contract(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    """Загрузить уже подписанный договор (.docx) — распознаётся автоматически:
+    ФИО заказчика, даты, сумма, график платежей, контакты. Договор пытается
+    сам привязаться к ученику по совпадению ФИО (та же логика, что и для
+    чеков об оплате)."""
+    ext = Path(file.filename or "").suffix.lower()
+    if ext != ".docx":
+        raise HTTPException(status_code=400, detail="Поддерживаются только файлы .docx")
+
+    contents = await file.read()
+    if len(contents) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Файл слишком большой, максимум 15 МБ")
+
+    upload_dir = Path(__file__).resolve().parents[4] / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    stored_path = upload_dir / stored_name
+    stored_path.write_bytes(contents)
+
+    try:
+        parsed = parse_contract_docx(str(stored_path))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось разобрать договор: {e}")
+
+    child_id = None
+    parent_id = None
+    match_status = "unmatched"
+    match_name = parsed.get("client_name_header") or parsed.get("parent_full_name")
+    if match_name:
+        child_id = await _find_child_by_payer_name(match_name, db)
+        if child_id:
+            match_status = "matched"
+            parent_link_res = await db.execute(
+                select(ParentChild).where(ParentChild.child_id == child_id)
+            )
+            parent_link = parent_link_res.scalars().first()
+            if parent_link:
+                parent_id = parent_link.parent_id
+        else:
+            match_status = "ambiguous_or_unmatched"
+
+    warnings = list(parsed.get("parse_warnings") or [])
+    if match_status != "matched":
+        warnings.append("Не удалось однозначно привязать договор к ученику — выберите вручную")
+
+    contract = ParentContract(
+        parent_id=parent_id,
+        child_id=child_id,
+        file_url=f"/uploads/{stored_name}",
+        is_signed=True,
+        contract_number=parsed.get("contract_number"),
+        client_name_raw=match_name,
+        start_date=parsed.get("start_date"),
+        end_date=parsed.get("end_date"),
+        total_amount=parsed.get("total_amount"),
+        parent_full_name=parsed.get("parent_full_name"),
+        parent_phone=parsed.get("parent_phone"),
+        parent_email=parsed.get("parent_email"),
+        city=parsed.get("city"),
+        street=parsed.get("street"),
+        house=parsed.get("house"),
+        payments_json=json.dumps(parsed.get("payments") or []),
+        match_status=match_status,
+        needs_review=bool(warnings),
+    )
+    db.add(contract)
+    await db.commit()
+    await db.refresh(contract)
+
+    result = await db.execute(
+        select(ParentContract).options(
+            joinedload(ParentContract.parent).joinedload(ParentProfile.user),
+            joinedload(ParentContract.child).joinedload(ChildProfile.user),
+        ).where(ParentContract.id == contract.id)
+    )
+    contract = result.unique().scalar_one()
+    row = _serialize_contract(contract)
+    row["parse_warnings"] = warnings
+    return row
+
+
+class ContractAssignChild(BaseModel):
+    child_id: int
+
+
+@router.post("/contracts/{contract_id}/assign-child", dependencies=[Depends(require_admin)])
+async def assign_contract_child(
+    contract_id: int, payload: ContractAssignChild, db: AsyncSession = Depends(get_db)
+):
+    """Вручную привязать договор к ученику, если автоматическая привязка не сработала."""
+    result = await db.execute(select(ParentContract).where(ParentContract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Договор не найден")
+
+    child_res = await db.execute(select(ChildProfile).where(ChildProfile.id == payload.child_id))
+    child = child_res.scalar_one_or_none()
+    if not child:
+        raise HTTPException(status_code=404, detail="Ученик не найден")
+
+    contract.child_id = child.id
+    parent_link_res = await db.execute(
+        select(ParentChild).where(ParentChild.child_id == child.id)
+    )
+    parent_link = parent_link_res.scalars().first()
+    contract.parent_id = parent_link.parent_id if parent_link else None
+    contract.match_status = "matched"
+    await db.commit()
+
+    result = await db.execute(
+        select(ParentContract).options(
+            joinedload(ParentContract.parent).joinedload(ParentProfile.user),
+            joinedload(ParentContract.child).joinedload(ChildProfile.user),
+        ).where(ParentContract.id == contract_id)
+    )
+    return _serialize_contract(result.unique().scalar_one())
+
+
+@router.post("/contracts/{contract_id}/recalculate", dependencies=[Depends(require_admin)])
+async def recalculate_contract(
+    contract_id: int,
+    as_of: Optional[date] = Query(None, description="Дата, на которую считать рекомендацию (по умолчанию — сегодня)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Пересчитать рекомендацию по договору на указанную дату (для теста —
+    можно указать любую прошедшую дату, например ?as_of=2026-08-30)."""
+    result = await db.execute(select(ParentContract).where(ParentContract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Договор не найден")
+
+    check_date = as_of or date.today()
+    recommendation = await _compute_recommendation(db, contract, check_date)
+    if recommendation is not None:
+        contract.recommendation = recommendation
+        contract.recommendation_as_of = check_date
+        await db.commit()
+
+    result = await db.execute(
+        select(ParentContract).options(
+            joinedload(ParentContract.parent).joinedload(ParentProfile.user),
+            joinedload(ParentContract.child).joinedload(ChildProfile.user),
+        ).where(ParentContract.id == contract_id)
+    )
+    row = _serialize_contract(result.unique().scalar_one())
+    if recommendation is None:
+        row["skip_reason"] = "На эту дату в договоре ещё нет ни одного срока платежа — договор не исследуется"
+    return row
+
+
+async def recalculate_all_contracts(db: AsyncSession, as_of: Optional[date] = None) -> int:
+    """Пересчитать рекомендации по всем привязанным к ученику договорам.
+    Используется еженедельным фоновым заданием (каждое воскресенье)."""
+    check_date = as_of or date.today()
+    result = await db.execute(
+        select(ParentContract).where(ParentContract.child_id.isnot(None))
+    )
+    updated = 0
+    for contract in result.scalars().all():
+        recommendation = await _compute_recommendation(db, contract, check_date)
+        if recommendation is not None:
+            contract.recommendation = recommendation
+            contract.recommendation_as_of = check_date
+            updated += 1
+    await db.commit()
+    return updated
+
+
+@router.post("/contracts/recalculate-all", dependencies=[Depends(require_admin)])
+async def recalculate_all_contracts_endpoint(
+    as_of: Optional[date] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    updated = await recalculate_all_contracts(db, as_of)
+    return {"updated": updated, "as_of": (as_of or date.today()).isoformat()}
+
+
 @router.get("/contracts-dashboard", dependencies=[Depends(require_admin)])
 async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
     parent_result = await db.execute(
@@ -560,31 +814,7 @@ async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
         )
     )
-    rows = []
-    for contract in parent_result.scalars().unique().all():
-        parent_user = contract.parent.user if contract.parent else None
-        child_user = contract.child.user if contract.child else None
-        rows.append({
-            "id": f"parent-{contract.id}",
-            "number": f"P-{contract.id:04d}",
-            "type": "Родитель",
-            "status": "Действующий" if contract.is_signed else "Ожидает подписи",
-            "start_date": contract.created_at.date().isoformat() if contract.created_at else None,
-            "end_date": None,
-            "parent_full_name": f"{parent_user.last_name} {parent_user.first_name}".strip() if parent_user else "",
-            "parent_phone": parent_user.phone if parent_user else "",
-            "city": "",
-            "street": "",
-            "house": "",
-            "flat": "",
-            "index": "",
-            "email": parent_user.email if parent_user else "",
-            "letter": False,
-            "student_name": f"{child_user.last_name} {child_user.first_name}".strip() if child_user else "",
-            "total_amount": None,
-            "file_url": contract.signed_file_url or contract.file_url,
-        })
-    return rows
+    return [_serialize_contract(c) for c in parent_result.scalars().unique().all()]
 
 
 # ─── Ручная привязка Родитель ↔ Ребёнок ────────────────────────────────────────
