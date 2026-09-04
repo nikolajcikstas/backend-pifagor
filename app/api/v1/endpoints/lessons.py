@@ -2,9 +2,9 @@ from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import aliased, joinedload, selectinload
 
 from app.core.deps import get_current_user
 from app.db.session import get_db
@@ -121,6 +121,7 @@ async def get_lessons(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     status: Optional[LessonStatus] = Query(None),
+    search: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -157,6 +158,32 @@ async def get_lessons(
         filters.append(Lesson.status == status)
 
     stmt = select(Lesson)
+
+    search = (search or "").strip()
+    if search:
+        # Поиск по ученику/репетитору/предмету/статусу/примечаниям — фильтруется
+        # в базе (по индексам), а не выгрузкой всех занятий на фронт.
+        pattern = f"%{search}%"
+        TutorUser = aliased(User)
+        ChildUser = aliased(User)
+        stmt = (
+            stmt.join(TutorProfile, Lesson.tutor_id == TutorProfile.id, isouter=True)
+            .join(TutorUser, TutorProfile.user_id == TutorUser.id, isouter=True)
+            .join(ChildProfile, Lesson.child_id == ChildProfile.id, isouter=True)
+            .join(ChildUser, ChildProfile.user_id == ChildUser.id, isouter=True)
+            .join(Subject, Lesson.subject_id == Subject.id, isouter=True)
+            .where(
+                or_(
+                    TutorUser.first_name.ilike(pattern),
+                    TutorUser.last_name.ilike(pattern),
+                    ChildUser.first_name.ilike(pattern),
+                    ChildUser.last_name.ilike(pattern),
+                    Subject.name.ilike(pattern),
+                    Lesson.notes.ilike(pattern),
+                )
+            )
+        )
+
     if filters:
         stmt = stmt.where(and_(*filters))
     stmt = _lesson_options(stmt.order_by(Lesson.date, Lesson.time_start))

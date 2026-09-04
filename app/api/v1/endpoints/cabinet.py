@@ -691,8 +691,13 @@ async def get_tutor_finance(
     total_paid = paid_result.scalar() or 0
     earnings = round(max(0.0, total_earned - total_paid), 2)
 
+    # Количество занятий, которое показываем рядом с суммой — считается от самой
+    # суммы (сумма / ставка), а не общим числом проведённых занятий за всю
+    # историю, чтобы цифры были согласованы между собой.
+    unpaid_lessons_count = round(earnings / rate) if rate else lessons_done
+
     return {
-        "lessons_done": lessons_done,
+        "lessons_done": unpaid_lessons_count,
         "earnings": earnings,
         "acts_count": acts_count,
     }

@@ -115,6 +115,13 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS homework_comment TEXT",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS engagement_score INTEGER",
                     "UPDATE child_profiles SET crm_status = 'Пробное' WHERE crm_status LIKE 'Р%' OR crm_status IS NULL",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_id ON lessons (tutor_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_child_id ON lessons (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_subject_id ON lessons (subject_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_date ON lessons (date)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_status ON lessons (status)",
+                    "CREATE INDEX IF NOT EXISTS ix_users_first_name ON users (first_name)",
+                    "CREATE INDEX IF NOT EXISTS ix_users_last_name ON users (last_name)",
                 ):
                     try:
                         await conn.execute(text(sql))
@@ -188,63 +195,6 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "pifagor-api"}
-
-
-@app.get("/_maint/fix-payouts-x7k2m9")
-async def _maint_fix_payouts():
-    """Разовая техническая ссылка — пересчитывает уже сделанные выплаты
-    репетиторам по правильной формуле (сумма по дате оплаты, а не на
-    сегодня). Делает то же самое, что fix_payouts.py. Удалить этот
-    роут из кода после использования."""
-    from sqlalchemy import func, select as _select
-    from app.db.session import AsyncSessionLocal
-    from app.models.models import TutorProfile, TutorPayout, Lesson, LessonStatus
-
-    changed = []
-    async with AsyncSessionLocal() as db:
-        tutors_result = await db.execute(_select(TutorProfile))
-        tutors = tutors_result.scalars().all()
-
-        for tutor in tutors:
-            payouts_result = await db.execute(
-                _select(TutorPayout)
-                .where(TutorPayout.tutor_id == tutor.id)
-                .order_by(TutorPayout.created_at, TutorPayout.id)
-            )
-            payouts = payouts_result.scalars().all()
-            if not payouts:
-                continue
-
-            rate = tutor.rate_per_hour or 0
-            running_paid = 0.0
-
-            for payout in payouts:
-                count_result = await db.execute(
-                    _select(func.count(Lesson.id)).where(
-                        Lesson.tutor_id == tutor.id,
-                        Lesson.status == LessonStatus.completed,
-                        Lesson.date <= payout.paid_at,
-                    )
-                )
-                lessons_count = count_result.scalar() or 0
-                earned_by_date = round(lessons_count * rate, 2) if rate else lessons_count * 80
-                correct_amount = round(max(0.0, earned_by_date - running_paid), 2)
-
-                if correct_amount != payout.amount:
-                    changed.append({
-                        "tutor_id": tutor.id,
-                        "payout_id": payout.id,
-                        "paid_at": str(payout.paid_at),
-                        "old_amount": payout.amount,
-                        "new_amount": correct_amount,
-                    })
-                    payout.amount = correct_amount
-
-                running_paid += correct_amount
-
-        await db.commit()
-
-    return {"changed_count": len(changed), "changed": changed}
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))

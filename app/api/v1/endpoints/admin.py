@@ -347,10 +347,17 @@ async def finance_report(
     )
     lessons_by_child = {row.child_id: row.cnt for row in lessons_res}
 
-    # Paid receipts in the selected range.
+    # Paid receipts in the selected range — учитываем только чеки с даты не раньше,
+    # чем ученик был внесён в CRM (created_at профиля), чтобы старые чеки
+    # перенесённых учеников не считались как оплата здесь.
     receipts_res = await db.execute(
         select(EmailReceipt.child_id, func.sum(EmailReceipt.amount).label("total"))
-        .where(*receipt_filters)
+        .join(ChildProfile, EmailReceipt.child_id == ChildProfile.id)
+        .join(User, ChildProfile.user_id == User.id)
+        .where(
+            *receipt_filters,
+            func.coalesce(EmailReceipt.payment_date, EmailReceipt.created_at) >= User.created_at,
+        )
         .group_by(EmailReceipt.child_id)
     )
     amounts_by_child = {row.child_id: row.total for row in receipts_res}
