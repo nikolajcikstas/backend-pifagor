@@ -17,13 +17,14 @@ from app.models.models import (
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
     TutorProfile, TutorSubject, Subject, TutorDocument, TutorContract, Act,
     Homework, Report, Material, ParentContract, Payment, Comment, TestResult, Review,
+    TutorPayout,
 )
 from app.schemas.schemas import (
     InviteCodeCreate, InviteCodeResponse,
     EmailReceiptOut, StudentFinanceRow,
     TutorProfileOut, AdminTutorUpdate,
     TutorDocumentCreate, TutorDocumentOut,
-    ActOut,
+    ActOut, TutorPayoutCreate, TutorPayoutOut,
 )
 
 router = APIRouter()
@@ -618,7 +619,7 @@ async def bind_parent_to_child(payload: BaseParentChildLink, db: AsyncSession = 
 
 # ─── Tutors (admin management) ─────────────────────────────────────────────────
 
-def _serialize_tutor(tutor: TutorProfile) -> TutorProfileOut:
+def _serialize_tutor(tutor: TutorProfile, earnings: Optional[float] = None) -> TutorProfileOut:
     """TutorProfile.subjects is a list of TutorSubject link rows, not Subject —
     unwrap them into the actual Subject objects expected by TutorProfileOut."""
     return TutorProfileOut(
@@ -630,7 +631,40 @@ def _serialize_tutor(tutor: TutorProfile) -> TutorProfileOut:
         is_published=tutor.is_published,
         user=tutor.user,
         subjects=[ts.subject for ts in tutor.subjects if ts.subject is not None],
+        earnings=earnings,
     )
+
+
+async def _tutor_earnings_map(db: AsyncSession, tutor_ids: List[int]) -> dict[int, float]:
+    """Сколько сейчас должны каждому репетитору: (проведённые занятия * ставка) - уже выплачено."""
+    if not tutor_ids:
+        return {}
+
+    rates_res = await db.execute(
+        select(TutorProfile.id, TutorProfile.rate_per_hour).where(TutorProfile.id.in_(tutor_ids))
+    )
+    rate_by_tutor = {row[0]: (row[1] or 0) for row in rates_res.all()}
+
+    counts_res = await db.execute(
+        select(Lesson.tutor_id, func.count(Lesson.id))
+        .where(Lesson.tutor_id.in_(tutor_ids), Lesson.status == LessonStatus.completed)
+        .group_by(Lesson.tutor_id)
+    )
+    count_by_tutor = {row[0]: row[1] for row in counts_res.all()}
+
+    paid_res = await db.execute(
+        select(TutorPayout.tutor_id, func.sum(TutorPayout.amount))
+        .where(TutorPayout.tutor_id.in_(tutor_ids))
+        .group_by(TutorPayout.tutor_id)
+    )
+    paid_by_tutor = {row[0]: (row[1] or 0) for row in paid_res.all()}
+
+    result = {}
+    for tutor_id in tutor_ids:
+        total_earned = count_by_tutor.get(tutor_id, 0) * rate_by_tutor.get(tutor_id, 0)
+        paid = paid_by_tutor.get(tutor_id, 0)
+        result[tutor_id] = round(max(0.0, total_earned - paid), 2)
+    return result
 
 
 @router.get("/tutors", response_model=List[TutorProfileOut], dependencies=[Depends(require_admin)])
@@ -645,7 +679,8 @@ async def list_admin_tutors(db: AsyncSession = Depends(get_db)):
         .order_by(TutorProfile.id)
     )
     tutors = result.unique().scalars().all()
-    return [_serialize_tutor(t) for t in tutors]
+    earnings_map = await _tutor_earnings_map(db, [t.id for t in tutors])
+    return [_serialize_tutor(t, earnings=earnings_map.get(t.id, 0.0)) for t in tutors]
 
 
 @router.patch("/tutors/{tutor_id}", response_model=TutorProfileOut, dependencies=[Depends(require_admin)])
@@ -710,7 +745,41 @@ async def update_admin_tutor(
         )
         .where(TutorProfile.id == tutor_id)
     )
-    return _serialize_tutor(result.unique().scalar_one())
+    tutor = result.unique().scalar_one()
+    earnings_map = await _tutor_earnings_map(db, [tutor.id])
+    return _serialize_tutor(tutor, earnings=earnings_map.get(tutor.id, 0.0))
+
+
+@router.post("/tutors/{tutor_id}/pay", response_model=TutorPayoutOut, dependencies=[Depends(require_admin)])
+async def pay_admin_tutor(
+    tutor_id: int,
+    payload: TutorPayoutCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Отметить зарплату репетитору как выплаченную на выбранную дату.
+    Обнуляет текущий баланс (то, что показывается у репетитора в «Финансы» и
+    у админа во вкладке «Репетиторы»)."""
+    tutor_res = await db.execute(select(TutorProfile).where(TutorProfile.id == tutor_id))
+    tutor = tutor_res.scalar_one_or_none()
+    if not tutor:
+        raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
+
+    earnings_map = await _tutor_earnings_map(db, [tutor_id])
+    outstanding = earnings_map.get(tutor_id, 0.0)
+    if outstanding <= 0:
+        raise HTTPException(status_code=400, detail="Этому репетитору сейчас нечего платить")
+
+    payout = TutorPayout(tutor_id=tutor_id, amount=outstanding, paid_at=payload.paid_at)
+    db.add(payout)
+    if tutor.user_id:
+        db.add(Notification(
+            user_id=tutor.user_id,
+            title="Зарплата выплачена",
+            body=f"Вам выплачено {outstanding} BYN за {payload.paid_at}.",
+        ))
+    await db.commit()
+    await db.refresh(payout)
+    return payout
 
 
 @router.delete("/tutors/{tutor_id}", status_code=204, dependencies=[Depends(require_admin)])

@@ -132,6 +132,7 @@ class TutorProfileOut(BaseModel):
     is_published: bool
     user: UserOut
     subjects: List[SubjectOut] = []
+    earnings: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -148,6 +149,20 @@ class AdminTutorUserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     avatar_url: Optional[str] = None
+
+
+class TutorPayoutCreate(BaseModel):
+    paid_at: DateType
+
+
+class TutorPayoutOut(BaseModel):
+    id: int
+    tutor_id: int
+    amount: float
+    paid_at: DateType
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class AdminTutorUpdate(BaseModel):

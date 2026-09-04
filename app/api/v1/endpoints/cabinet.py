@@ -13,7 +13,8 @@ from app.db.session import get_db
 from app.models.models import (
     Report, Homework, Payment, Test, TestQuestion, TestAnswer,
     TestResult, Notification, Comment, Act, ParentContract, TutorContract,
-    User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument, ChildProfile
+    User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument, ChildProfile,
+    TutorPayout,
 )
 from app.schemas.schemas import (
     ReportCreate, ReportOut,
@@ -680,9 +681,15 @@ async def get_tutor_finance(
     )
     acts_count = acts_result.scalar() or 0
 
-    # Estimate earnings (rate_per_hour from profile)
+    # Estimate earnings (rate_per_hour from profile), minus already-paid salary
     rate = current_user.tutor_profile.rate_per_hour or 0
-    earnings = round(lessons_done * rate, 2) if rate else lessons_done * 80
+    total_earned = round(lessons_done * rate, 2) if rate else lessons_done * 80
+
+    paid_result = await db.execute(
+        select(func.sum(TutorPayout.amount)).where(TutorPayout.tutor_id == tutor_id)
+    )
+    total_paid = paid_result.scalar() or 0
+    earnings = round(max(0.0, total_earned - total_paid), 2)
 
     return {
         "lessons_done": lessons_done,

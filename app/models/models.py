@@ -83,6 +83,7 @@ class TutorProfile(Base):
     lessons: Mapped[List["Lesson"]] = relationship(back_populates="tutor")
     contracts: Mapped[List["TutorContract"]] = relationship(back_populates="tutor")
     reports: Mapped[List["Report"]] = relationship(back_populates="tutor")
+    payouts: Mapped[List["TutorPayout"]] = relationship(back_populates="tutor")
 
 
 class ParentProfile(Base):
@@ -307,6 +308,21 @@ class Payment(Base):
 
     parent: Mapped["ParentProfile"] = relationship(back_populates="payments")
     child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Tutor Payouts (выплаты зарплаты репетиторам) ─────────────────────────────
+
+class TutorPayout(Base):
+    """Запись о выплате репетитору. Обнуляет текущий баланс (заработано - выплачено)."""
+    __tablename__ = "tutor_payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    paid_at: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="payouts")
 
 
 # ─── Prices ───────────────────────────────────────────────────────────────────
