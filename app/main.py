@@ -197,6 +197,66 @@ async def health():
     return {"status": "ok", "service": "pifagor-api"}
 
 
+@app.get("/_maint/debug-student-q8w3n5")
+async def _maint_debug_student(name: str):
+    """Разовая диагностическая ссылка (только чтение, ничего не меняет).
+    Показывает по ученику: когда его профиль был создан, все его занятия
+    и все чеки, которые на него сматчены. Удалить после использования."""
+    from sqlalchemy import select as _select
+    from sqlalchemy.orm import joinedload as _joinedload
+    from app.db.session import AsyncSessionLocal
+    from app.models.models import ChildProfile, User, Lesson, EmailReceipt
+
+    pattern = f"%{name}%"
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            _select(ChildProfile)
+            .join(User, ChildProfile.user_id == User.id)
+            .options(_joinedload(ChildProfile.user))
+            .where((User.first_name.ilike(pattern)) | (User.last_name.ilike(pattern)))
+        )
+        children = result.unique().scalars().all()
+        if not children:
+            return {"error": f"Ученик по имени '{name}' не найден"}
+
+        output = []
+        for child in children:
+            lessons_res = await db.execute(
+                _select(Lesson).where(Lesson.child_id == child.id).order_by(Lesson.date)
+            )
+            lessons = [
+                {"date": str(l.date), "status": l.status, "is_free_trial": l.is_free_trial}
+                for l in lessons_res.scalars().all()
+            ]
+
+            receipts_res = await db.execute(
+                _select(EmailReceipt).where(EmailReceipt.child_id == child.id).order_by(EmailReceipt.payment_date)
+            )
+            receipts = [
+                {
+                    "payment_date": str(r.payment_date),
+                    "created_at": str(r.created_at),
+                    "amount": r.amount,
+                    "payer_name": r.payer_name,
+                    "receipt_number": r.receipt_number,
+                }
+                for r in receipts_res.scalars().all()
+            ]
+
+            output.append({
+                "child_id": child.id,
+                "name": f"{child.user.last_name} {child.user.first_name}",
+                "user_created_at": str(child.user.created_at),
+                "lesson_price": child.lesson_price,
+                "lessons_count": len(lessons),
+                "lessons": lessons,
+                "receipts_count": len(receipts),
+                "receipts": receipts,
+            })
+
+        return output
+
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 uploads_dir = os.path.join(current_dir, "uploads")
