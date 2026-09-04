@@ -710,6 +710,42 @@ async def upload_contract(file: UploadFile = File(...), db: AsyncSession = Depen
     return row
 
 
+class ContractFieldsUpdate(BaseModel):
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    total_amount: Optional[float] = None
+    parent_full_name: Optional[str] = None
+    parent_phone: Optional[str] = None
+    parent_email: Optional[str] = None
+    city: Optional[str] = None
+    street: Optional[str] = None
+    house: Optional[str] = None
+
+
+@router.patch("/contracts/{contract_id}", dependencies=[Depends(require_admin)])
+async def update_contract_fields(
+    contract_id: int, payload: ContractFieldsUpdate, db: AsyncSession = Depends(get_db)
+):
+    """Ручная правка распознанных полей договора (когда парсер ошибся или
+    не смог что-то распознать)."""
+    result = await db.execute(select(ParentContract).where(ParentContract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Договор не найден")
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(contract, field, value)
+    await db.commit()
+
+    result = await db.execute(
+        select(ParentContract).options(
+            joinedload(ParentContract.parent).joinedload(ParentProfile.user),
+            joinedload(ParentContract.child).joinedload(ChildProfile.user),
+        ).where(ParentContract.id == contract_id)
+    )
+    return _serialize_contract(result.unique().scalar_one())
+
+
 class ContractAssignChild(BaseModel):
     child_id: int
 

@@ -170,25 +170,42 @@ def parse_contract_docx(file_path: str) -> dict:
         if flat_m:
             addr = addr[:flat_m.start()] + addr[flat_m.end():]
 
-        city_m = re.search(r"г\.\s*([^,\.]+)", addr)
-        city = city_m.group(1).strip() if city_m else None
-        if city_m:
-            addr = addr[:city_m.start()] + addr[city_m.end():]
-
         addr = re.sub(r"^[,.\s]+|[,.\s]+$", "", addr)
         parts = [p.strip() for p in re.split(r"[,]", addr) if p.strip()]
+
+        # Тип населённого пункта (город/деревня/агрогородок/посёлок и т.п.) —
+        # приравниваем к городу, независимо от того, в каком по счёту сегменте
+        # адреса он встретился.
+        SETTLEMENT_PREFIX = re.compile(
+            r"^(?:г\.?|гор\.?|город|д\.?|дер\.?|деревня|аг\.?|агрогородок|п\.?|пос\.?|посёлок|поселок|гп\.?)\s*(.+)$",
+            re.IGNORECASE,
+        )
+        # Чисто районная часть адреса ("Минский р-н") — не город и не улица, отбрасываем.
+        DISTRICT_ONLY = re.compile(r"^.+\s+р-?н\.?$|^.+\s+район$", re.IGNORECASE)
+
+        city = None
+        street_parts = []
+        for part in parts:
+            if DISTRICT_ONLY.match(part):
+                continue
+            sm = SETTLEMENT_PREFIX.match(part)
+            if sm and city is None:
+                city = sm.group(1).strip(" .")
+                continue
+            street_parts.append(part)
+
         street = None
         house = None
-        if parts:
-            last = parts[-1]
+        if street_parts:
+            last = street_parts[-1]
             hm = re.search(r"(\d[\d/]*)\s*$", last)
             if hm:
                 house = hm.group(1)
                 street = last[:hm.start()].strip(" .")
             else:
                 street = last
-            if len(parts) > 1:
-                street = ", ".join(parts[:-1]) + (f", {street}" if street else "")
+            if len(street_parts) > 1:
+                street = ", ".join(street_parts[:-1]) + (f", {street}" if street else "")
 
         result["city"] = city
         result["street"] = street
