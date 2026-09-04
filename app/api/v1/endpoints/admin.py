@@ -635,8 +635,14 @@ def _serialize_tutor(tutor: TutorProfile, earnings: Optional[float] = None) -> T
     )
 
 
-async def _tutor_earnings_map(db: AsyncSession, tutor_ids: List[int]) -> dict[int, float]:
-    """Сколько сейчас должны каждому репетитору: (проведённые занятия * ставка) - уже выплачено."""
+async def _tutor_earnings_map(
+    db: AsyncSession,
+    tutor_ids: List[int],
+    as_of: Optional[date] = None,
+) -> dict[int, float]:
+    """Сколько должны каждому репетитору: (проведённые занятия * ставка) - уже выплачено.
+    Если as_of указан — считаются только занятия с датой не позже as_of (для расчёта
+    суммы к оплате при выборе конкретной даты выплаты)."""
     if not tutor_ids:
         return {}
 
@@ -645,9 +651,12 @@ async def _tutor_earnings_map(db: AsyncSession, tutor_ids: List[int]) -> dict[in
     )
     rate_by_tutor = {row[0]: (row[1] or 0) for row in rates_res.all()}
 
+    count_filters = [Lesson.tutor_id.in_(tutor_ids), Lesson.status == LessonStatus.completed]
+    if as_of is not None:
+        count_filters.append(Lesson.date <= as_of)
     counts_res = await db.execute(
         select(Lesson.tutor_id, func.count(Lesson.id))
-        .where(Lesson.tutor_id.in_(tutor_ids), Lesson.status == LessonStatus.completed)
+        .where(*count_filters)
         .group_by(Lesson.tutor_id)
     )
     count_by_tutor = {row[0]: row[1] for row in counts_res.all()}
@@ -757,17 +766,18 @@ async def pay_admin_tutor(
     db: AsyncSession = Depends(get_db),
 ):
     """Отметить зарплату репетитору как выплаченную на выбранную дату.
-    Обнуляет текущий баланс (то, что показывается у репетитора в «Финансы» и
-    у админа во вкладке «Репетиторы»)."""
+    Оплачивается только то, что заработано занятиями с датой не позже выбранной
+    (payload.paid_at) — не весь текущий баланс на сегодня. Остаток за занятия
+    после этой даты продолжает числиться как долг."""
     tutor_res = await db.execute(select(TutorProfile).where(TutorProfile.id == tutor_id))
     tutor = tutor_res.scalar_one_or_none()
     if not tutor:
         raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
 
-    earnings_map = await _tutor_earnings_map(db, [tutor_id])
+    earnings_map = await _tutor_earnings_map(db, [tutor_id], as_of=payload.paid_at)
     outstanding = earnings_map.get(tutor_id, 0.0)
     if outstanding <= 0:
-        raise HTTPException(status_code=400, detail="Этому репетитору сейчас нечего платить")
+        raise HTTPException(status_code=400, detail="На выбранную дату этому репетитору нечего платить")
 
     payout = TutorPayout(tutor_id=tutor_id, amount=outstanding, paid_at=payload.paid_at)
     db.add(payout)
@@ -779,7 +789,16 @@ async def pay_admin_tutor(
         ))
     await db.commit()
     await db.refresh(payout)
-    return payout
+
+    remaining_map = await _tutor_earnings_map(db, [tutor_id])
+    return TutorPayoutOut(
+        id=payout.id,
+        tutor_id=payout.tutor_id,
+        amount=payout.amount,
+        paid_at=payout.paid_at,
+        created_at=payout.created_at,
+        earnings_after=remaining_map.get(tutor_id, 0.0),
+    )
 
 
 @router.delete("/tutors/{tutor_id}", status_code=204, dependencies=[Depends(require_admin)])

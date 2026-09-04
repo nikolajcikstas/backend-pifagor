@@ -161,6 +161,7 @@ class TutorPayoutOut(BaseModel):
     amount: float
     paid_at: DateType
     created_at: datetime
+    earnings_after: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
