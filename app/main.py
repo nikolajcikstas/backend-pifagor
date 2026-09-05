@@ -163,6 +163,7 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT false",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS recommendation TEXT",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS recommendation_as_of DATE",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(20) NOT NULL DEFAULT 'unknown'",
                 ):
                     try:
                         await conn.execute(text(sql))

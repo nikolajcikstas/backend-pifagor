@@ -589,26 +589,35 @@ def _serialize_contract(contract: ParentContract) -> dict:
 
 async def _compute_recommendation(
     db: AsyncSession, contract: ParentContract, as_of: date
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """Сравнивает, сколько занятий должно было пройти согласно графику
-    платежей на дату as_of, с тем, сколько реально проведено."""
-    if not contract.payments_json or not contract.child_id:
-        return None
+    платежей на дату as_of, с тем, сколько реально проведено.
+    Возвращает (рекомендация, причина_пропуска) — ровно одно из двух не None."""
+    if not contract.child_id:
+        return None, "Договор ещё не привязан к ученику"
 
-    payments = json.loads(contract.payments_json)
+    if contract.payment_mode == "per_lesson":
+        return "После каждого занятия", None
+    if contract.payment_mode == "monthly":
+        return "Оплата ежемесячно (фиксированного графика по занятиям нет)", None
+
+    payments = json.loads(contract.payments_json) if contract.payments_json else []
+    if not payments:
+        return None, "Не удалось распознать график платежей в тексте договора — проверьте вручную"
+
     due_payments = [
         p for p in payments
         if date.fromisoformat(p["due_date"]) <= as_of
     ]
     if not due_payments:
-        return None  # ещё нет ни одного срока платежа — договор не исследуется
+        return None, "На эту дату в договоре ещё нет ни одного срока платежа — договор не исследуется"
 
     total_due = round(sum(p["amount"] for p in due_payments), 2)
 
     child_res = await db.execute(select(ChildProfile).where(ChildProfile.id == contract.child_id))
     child = child_res.scalar_one_or_none()
     if not child or not child.lesson_price:
-        return None
+        return None, "У ученика не указана стоимость занятия — расчёт невозможен"
 
     a = int(total_due // child.lesson_price)
 
@@ -622,10 +631,10 @@ async def _compute_recommendation(
     b = count_res.scalar() or 0
 
     if a > b:
-        return f"Отработать {a - b} занятий (на {as_of.isoformat()})"
+        return f"Отработать {a - b} занятий (на {as_of.isoformat()})", None
     if b > a:
-        return f"Проведено на {b - a} занятий больше (на {as_of.isoformat()})"
-    return f"Соответствует графику оплат (на {as_of.isoformat()})"
+        return f"Проведено на {b - a} занятий больше (на {as_of.isoformat()})", None
+    return f"Соответствует графику оплат (на {as_of.isoformat()})", None
 
 
 @router.post("/contracts/upload", dependencies=[Depends(require_admin)])
@@ -693,6 +702,7 @@ async def upload_contract(file: UploadFile = File(...), db: AsyncSession = Depen
         payments_json=json.dumps(parsed.get("payments") or []),
         match_status=match_status,
         needs_review=bool(warnings),
+        payment_mode=parsed.get("payment_mode") or "unknown",
     )
     db.add(contract)
     await db.commit()
@@ -797,7 +807,7 @@ async def recalculate_contract(
         raise HTTPException(status_code=404, detail="Договор не найден")
 
     check_date = as_of or date.today()
-    recommendation = await _compute_recommendation(db, contract, check_date)
+    recommendation, skip_reason = await _compute_recommendation(db, contract, check_date)
     if recommendation is not None:
         contract.recommendation = recommendation
         contract.recommendation_as_of = check_date
@@ -810,8 +820,8 @@ async def recalculate_contract(
         ).where(ParentContract.id == contract_id)
     )
     row = _serialize_contract(result.unique().scalar_one())
-    if recommendation is None:
-        row["skip_reason"] = "На эту дату в договоре ещё нет ни одного срока платежа — договор не исследуется"
+    if skip_reason:
+        row["skip_reason"] = skip_reason
     return row
 
 
@@ -824,7 +834,7 @@ async def recalculate_all_contracts(db: AsyncSession, as_of: Optional[date] = No
     )
     updated = 0
     for contract in result.scalars().all():
-        recommendation = await _compute_recommendation(db, contract, check_date)
+        recommendation, _skip_reason = await _compute_recommendation(db, contract, check_date)
         if recommendation is not None:
             contract.recommendation = recommendation
             contract.recommendation_as_of = check_date

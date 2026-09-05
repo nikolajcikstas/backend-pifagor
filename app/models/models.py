@@ -303,6 +303,7 @@ class ParentContract(Base):
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     recommendation: Mapped[Optional[str]] = mapped_column(Text)
     recommendation_as_of: Mapped[Optional[date]] = mapped_column(Date)
+    payment_mode: Mapped[str] = mapped_column(String(20), default="unknown", server_default="unknown")
 
     parent: Mapped[Optional["ParentProfile"]] = relationship(back_populates="contracts")
     child: Mapped[Optional["ChildProfile"]] = relationship()

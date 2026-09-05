@@ -106,7 +106,7 @@ def parse_contract_docx(file_path: str) -> dict:
 
     payments = []
     pattern = re.compile(
-        r"Заказчик вносит (\S+(?:\s\S+)?) платёж\s*([\d\s\xa0\u202f]+,\d+).*?"
+        r"Заказчик вносит (\S+(?:\s\S+)?) плат[её]ж\s*([\d\s\xa0\u202f]+,\d+).*?"
         r"не позднее\s*(\d{1,2}\s+\S+\s+\d{4})\s*года",
         re.IGNORECASE,
     )
@@ -121,7 +121,19 @@ def parse_contract_docx(file_path: str) -> dict:
             continue
         payments.append({"number": number, "amount": amount, "due_date": due_date.isoformat()})
     result["payments"] = payments
-    if not payments:
+
+    # Некоторые договоры вообще не содержат пронумерованный график платежей —
+    # оплата идёт по факту, после каждого занятия, либо ежемесячно к
+    # определённому числу. Это не ошибка парсинга — просто другой тип
+    # договора, для него формула "отработать N занятий" не применяется.
+    if payments:
+        result["payment_mode"] = "scheduled"
+    elif re.search(r"в день проведения (?:онлайн-встреч|занят)", full_text, re.IGNORECASE):
+        result["payment_mode"] = "per_lesson"
+    elif re.search(r"\d{1,2}-го числа каждого месяца", full_text, re.IGNORECASE):
+        result["payment_mode"] = "monthly"
+    else:
+        result["payment_mode"] = "unknown"
         result["parse_warnings"].append("Не найдено ни одного платежа в графике")
 
     if not d.tables:
@@ -135,12 +147,8 @@ def parse_contract_docx(file_path: str) -> dict:
 
     cell_text = table.rows[2].cells[0].text
     lines = [l.strip() for l in cell_text.split("\n") if l.strip()]
-    if lines:
-        result["parent_full_name"] = lines[0]
-    else:
-        result["parse_warnings"].append("Не удалось найти ФИО в блоке реквизитов")
 
-    phone_m = re.search(r"(\+375\d{9})", cell_text)
+    phone_m = re.search(r"(\+375\d{9}|\b80\d{9}\b)", cell_text)
     email_m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", cell_text)
     result["parent_phone"] = phone_m.group(1) if phone_m else None
     result["parent_email"] = email_m.group(0) if email_m else None
@@ -149,9 +157,19 @@ def parse_contract_docx(file_path: str) -> dict:
     if not result["parent_email"]:
         result["parse_warnings"].append("Не найден email в блоке реквизитов")
 
+    if lines:
+        # ФИО обычно первая строка, но иногда телефон приклеен туда же без
+        # переноса строки — вырезаем его, если он там нашёлся.
+        name_line = lines[0]
+        if result["parent_phone"]:
+            name_line = name_line.replace(result["parent_phone"], "")
+        result["parent_full_name"] = re.sub(r"\s+", " ", name_line).strip(" .")
+    else:
+        result["parse_warnings"].append("Не удалось найти ФИО в блоке реквизитов")
+
     address_line = None
     for l in lines[1:]:
-        if l == result["parent_phone"]:
+        if result["parent_phone"] and result["parent_phone"] in l:
             continue
         if result["parent_email"] and result["parent_email"] in l:
             continue
@@ -174,19 +192,24 @@ def parse_contract_docx(file_path: str) -> dict:
         parts = [p.strip() for p in re.split(r"[,]", addr) if p.strip()]
 
         # Тип населённого пункта (город/деревня/агрогородок/посёлок и т.п.) —
-        # приравниваем к городу, независимо от того, в каком по счёту сегменте
-        # адреса он встретился.
+        # приравниваем к городу. Точка после сокращения ОБЯЗАТЕЛЬНА (кроме
+        # полных слов) — иначе "п" без точки ложно совпадает с началом любого
+        # слова на "П" (например «Платонова»). После сокращения обязательно
+        # должна идти буква, а не цифра — иначе это «д.33» (номер дома), а не
+        # «д. Тарасово» (деревня).
         SETTLEMENT_PREFIX = re.compile(
-            r"^(?:г\.?|гор\.?|город|д\.?|дер\.?|деревня|аг\.?|агрогородок|п\.?|пос\.?|посёлок|поселок|гп\.?)\s*(.+)$",
-            re.IGNORECASE,
+            r"^(?:г\.|гор\.|город|д\.|дер\.|деревня|аг\.|агрогородок|п\.|пос\.|посёлок|поселок|гп\.)"
+            r"\s*([А-Яа-яЁё].*)$",
         )
-        # Чисто районная часть адреса ("Минский р-н") — не город и не улица, отбрасываем.
-        DISTRICT_ONLY = re.compile(r"^.+\s+р-?н\.?$|^.+\s+район$", re.IGNORECASE)
+        # Область/район — не город и не улица, отбрасываем как шум.
+        NOISE_ONLY = re.compile(
+            r"^.+\s+р-?н\.?$|^.+\s+район$|^.+\s+обл\.?$|^.+\s+область$", re.IGNORECASE
+        )
 
         city = None
         street_parts = []
         for part in parts:
-            if DISTRICT_ONLY.match(part):
+            if NOISE_ONLY.match(part):
                 continue
             sm = SETTLEMENT_PREFIX.match(part)
             if sm and city is None:
@@ -194,11 +217,40 @@ def parse_contract_docx(file_path: str) -> dict:
                 continue
             street_parts.append(part)
 
+        # Если явного "г./д./аг." нигде не было, но самый первый оставшийся
+        # сегмент — это просто голое название города без номеров (например
+        # "Минск" без "г."), и после него есть ещё сегменты с улицей/домом —
+        # считаем его городом.
+        if city is None and len(street_parts) > 1 and not any(ch.isdigit() for ch in street_parts[0]):
+            city = street_parts.pop(0).strip(" .")
+
+        # Адрес без единой запятой ("Минская обл. г.Дзержинск ул.Кооперативная 44") —
+        # ищем населённый пункт где угодно внутри строки, а не только в начале.
+        if city is None and len(street_parts) == 1:
+            inner = re.search(
+                r"(?:^|\s)(?:г\.|гор\.|город|д\.|дер\.|деревня|аг\.|агрогородок|п\.|пос\.|посёлок|поселок|гп\.)"
+                r"\s*([А-Яа-яЁё]+)",
+                street_parts[0],
+            )
+            if inner:
+                city = inner.group(1).strip(" .")
+                street_parts[0] = street_parts[0][inner.end():].strip(" .,")
+
+        # Голый город без "г." и без запятой перед улицей ("Минск ул. Пономарева 9-3").
+        if city is None and len(street_parts) == 1:
+            bare_m = re.match(r"^([А-ЯЁ][а-яё]+)\s+(?:ул\.|улица|пр-т|пр\.|проспект)", street_parts[0])
+            if bare_m:
+                city = bare_m.group(1)
+                street_parts[0] = street_parts[0][bare_m.end(1):].strip(" .,")
+
         street = None
         house = None
         if street_parts:
             last = street_parts[-1]
-            hm = re.search(r"(\d[\d/]*)\s*$", last)
+            # "д.33" — это номер дома ("дом"), а не населённый пункт; убираем
+            # такой префикс перед тем, как отделять номер дома от улицы.
+            last = re.sub(r"^д\.?\s*(?=\d)", "", last, flags=re.IGNORECASE)
+            hm = re.search(r"(\d+(?:[-/]\d+)*[а-яА-Я]?)\s*$", last)
             if hm:
                 house = hm.group(1)
                 street = last[:hm.start()].strip(" .")
