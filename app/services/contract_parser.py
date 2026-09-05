@@ -200,6 +200,7 @@ def parse_contract_docx(file_path: str) -> dict:
         SETTLEMENT_PREFIX = re.compile(
             r"^(?:г\.|гор\.|город|д\.|дер\.|деревня|аг\.|агрогородок|п\.|пос\.|посёлок|поселок|гп\.)"
             r"\s*([А-Яа-яЁё].*)$",
+            re.IGNORECASE,
         )
         # Область/район — не город и не улица, отбрасываем как шум.
         NOISE_ONLY = re.compile(
@@ -231,6 +232,7 @@ def parse_contract_docx(file_path: str) -> dict:
                 r"(?:^|\s)(?:г\.|гор\.|город|д\.|дер\.|деревня|аг\.|агрогородок|п\.|пос\.|посёлок|поселок|гп\.)"
                 r"\s*([А-Яа-яЁё]+)",
                 street_parts[0],
+                re.IGNORECASE,
             )
             if inner:
                 city = inner.group(1).strip(" .")
