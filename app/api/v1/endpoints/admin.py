@@ -529,7 +529,10 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
         subjects = [s.strip() for s in (child.subjects_text or "").split(",") if s.strip()] or lesson_subjects
         tutors = [t.strip() for t in (child.tutors_text or "").split(",") if t.strip()] or lesson_tutors
         contract_count_res = await db.execute(
-            select(func.count(ParentContract.id)).where(ParentContract.child_id == child.id)
+            select(func.count(ParentContract.id)).where(
+                ParentContract.child_id == child.id,
+                ParentContract.match_status == "matched",
+            )
         )
         has_contract = (contract_count_res.scalar() or 0) > 0
         parent_names = [f"{p.last_name} {p.first_name}".strip() for p in parents]
@@ -545,7 +548,10 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "subjects": subjects,
             "tutors": tutors,
             "has_contract": has_contract,
-            "contract_label": child.contract_label or ("Действующий" if has_contract else "Ожидает"),
+            "contract_label": (
+                "Расторгнут" if child.contract_label == "Расторгнут"
+                else ("Действующий" if has_contract else "Ожидает")
+            ),
             "notes": child.notes or "",
             "student_phone": user.phone,
             "parent_names": parent_names,
