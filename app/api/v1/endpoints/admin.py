@@ -545,7 +545,7 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "subjects": subjects,
             "tutors": tutors,
             "has_contract": has_contract,
-            "contract_label": child.contract_label or ("Есть" if has_contract else "Нет"),
+            "contract_label": child.contract_label or ("Действующий" if has_contract else "Ожидает"),
             "notes": child.notes or "",
             "student_phone": user.phone,
             "parent_names": parent_names,
