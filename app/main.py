@@ -245,6 +245,81 @@ async def health():
     return {"status": "ok", "service": "pifagor-api"}
 
 
+@app.get("/_maint/debug-payer-q7m3x9")
+async def _maint_debug_payer(name: str):
+    """Разовая диагностическая ссылка (только чтение). Показывает по имени
+    плательщика: все его чеки (включая разбивку по ученикам), а также по
+    каждому найденному ученику с похожей фамилией — все его занятия.
+    Удалить после использования."""
+    from sqlalchemy import select as _select, or_ as _or
+    from sqlalchemy.orm import joinedload as _joinedload
+    from app.db.session import AsyncSessionLocal
+    from app.models.models import (
+        EmailReceipt, EmailReceiptSplit, PayerChildLink, ChildProfile, User, Lesson, LessonStatus,
+    )
+
+    async with AsyncSessionLocal() as db:
+        receipts_res = await db.execute(
+            _select(EmailReceipt)
+            .options(_joinedload(EmailReceipt.splits).joinedload(EmailReceiptSplit.child).joinedload(ChildProfile.user))
+            .where(EmailReceipt.payer_name.ilike(f"%{name}%"))
+            .order_by(EmailReceipt.payment_date)
+        )
+        receipts = receipts_res.unique().scalars().all()
+
+        receipts_out = []
+        for r in receipts:
+            receipts_out.append({
+                "id": r.id,
+                "payer_name": r.payer_name,
+                "amount": r.amount,
+                "payment_date": str(r.payment_date),
+                "child_id": r.child_id,
+                "splits": [
+                    {"child_id": s.child_id, "amount": s.amount,
+                     "name": f"{s.child.user.last_name} {s.child.user.first_name}" if s.child and s.child.user else None}
+                    for s in r.splits
+                ],
+            })
+
+        links_res = await db.execute(
+            _select(PayerChildLink).options(_joinedload(PayerChildLink.child).joinedload(ChildProfile.user))
+        )
+        all_links = links_res.unique().scalars().all()
+        matching_links = [
+            l for l in all_links
+            if name.lower() in (l.payer_name_normalized or "").lower()
+        ]
+        links_out = [
+            {"payer_name_normalized": l.payer_name_normalized, "child_id": l.child_id,
+             "name": f"{l.child.user.last_name} {l.child.user.first_name}" if l.child and l.child.user else None}
+            for l in matching_links
+        ]
+
+        children_res = await db.execute(
+            _select(ChildProfile, User)
+            .join(User, ChildProfile.user_id == User.id)
+            .where(_or(User.last_name.ilike(f"%{name}%"), User.first_name.ilike(f"%{name}%")))
+        )
+        children_out = []
+        for child, user in children_res.all():
+            lessons_res = await db.execute(
+                _select(Lesson).where(Lesson.child_id == child.id).order_by(Lesson.date)
+            )
+            lessons = [
+                {"date": str(l.date), "status": l.status}
+                for l in lessons_res.scalars().all()
+            ]
+            children_out.append({
+                "child_id": child.id,
+                "name": f"{user.last_name} {user.first_name}",
+                "lesson_price": child.lesson_price,
+                "lessons": lessons,
+            })
+
+    return {"receipts": receipts_out, "payer_child_links": links_out, "children": children_out}
+
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 uploads_dir = os.path.join(current_dir, "uploads")
