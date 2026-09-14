@@ -314,6 +314,8 @@ async def _maint_debug_payer(name: str):
                 "child_id": child.id,
                 "name": f"{user.last_name} {user.first_name}",
                 "lesson_price": child.lesson_price,
+                "channel": child.channel,
+                "user_created_at": str(user.created_at),
                 "lessons": lessons,
             })
 
