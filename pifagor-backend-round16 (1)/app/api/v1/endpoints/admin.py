@@ -615,6 +615,60 @@ async def update_admin_student(
     if payload.accounting_start_date is not None:
         student.child_profile.accounting_start_date = payload.accounting_start_date
 
+    if payload.status is not None and payload.status.strip() == "Отказ":
+        this_child_id = student.child_profile.id
+        contracts_res = await db.execute(
+            select(ParentContract)
+            .options(joinedload(ParentContract.extra_children))
+            .where(
+                or_(
+                    ParentContract.child_id == this_child_id,
+                    ParentContract.id.in_(
+                        select(ParentContractChild.contract_id).where(
+                            ParentContractChild.child_id == this_child_id
+                        )
+                    ),
+                )
+            )
+        )
+        for contract in contracts_res.unique().scalars().all():
+            other_child_ids = [
+                link.child_id for link in contract.extra_children
+                if link.child_id != this_child_id
+            ]
+            if contract.child_id is not None and contract.child_id != this_child_id:
+                other_child_ids.insert(0, contract.child_id)
+            # убираем дубликаты, сохраняя порядок
+            seen = set()
+            other_child_ids = [cid for cid in other_child_ids if not (cid in seen or seen.add(cid))]
+
+            if not other_child_ids:
+                # этот ученик был единственным привязанным — удаляем весь договор
+                await db.execute(
+                    ParentContractChild.__table__.delete().where(
+                        ParentContractChild.contract_id == contract.id
+                    )
+                )
+                await db.delete(contract)
+            else:
+                # к договору привязаны другие ученики — отвязываем только этого,
+                # остальные остаются со статусом "Действующий"
+                await db.execute(
+                    ParentContractChild.__table__.delete().where(
+                        ParentContractChild.contract_id == contract.id,
+                        ParentContractChild.child_id == this_child_id,
+                    )
+                )
+                if contract.child_id == this_child_id:
+                    new_primary = other_child_ids[0]
+                    contract.child_id = new_primary
+                    await db.execute(
+                        ParentContractChild.__table__.delete().where(
+                            ParentContractChild.contract_id == contract.id,
+                            ParentContractChild.child_id == new_primary,
+                        )
+                    )
+
     should_rematch_receipts = any(
         value is not None
         for value in (
@@ -694,8 +748,14 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
         subjects = [s.strip() for s in (child.subjects_text or "").split(",") if s.strip()] or lesson_subjects
         tutors = [t.strip() for t in (child.tutors_text or "").split(",") if t.strip()] or lesson_tutors
         contract_count_res = await db.execute(
-            select(func.count(ParentContract.id)).where(
-                ParentContract.child_id == child.id,
+            select(func.count(func.distinct(ParentContract.id)))
+            .select_from(ParentContract)
+            .outerjoin(ParentContractChild, ParentContractChild.contract_id == ParentContract.id)
+            .where(
+                or_(
+                    ParentContract.child_id == child.id,
+                    ParentContractChild.child_id == child.id,
+                ),
                 ParentContract.match_status == "matched",
             )
         )

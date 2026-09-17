@@ -165,6 +165,21 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS recommendation_as_of DATE",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(20) NOT NULL DEFAULT 'unknown'",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS accounting_start_date DATE",
+                    # Индексы для ускорения дашбордов (СРМ, договоры, оплаты) —
+                    # без них запросы линейно замедляются с ростом числа учеников.
+                    "CREATE INDEX IF NOT EXISTS ix_parent_contracts_child_id ON parent_contracts (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_parent_contracts_match_status ON parent_contracts (match_status)",
+                    "CREATE INDEX IF NOT EXISTS ix_parent_contract_children_contract_id ON parent_contract_children (contract_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_parent_contract_children_child_id ON parent_contract_children (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_email_receipts_child_id ON email_receipts (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_email_receipt_splits_receipt_id ON email_receipt_splits (receipt_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_email_receipt_splits_child_id ON email_receipt_splits (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_child_profiles_crm_status ON child_profiles (crm_status)",
+                    "CREATE INDEX IF NOT EXISTS ix_parent_children_parent_id ON parent_children (parent_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_parent_children_child_id ON parent_children (child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_tutor_rate_history_tutor_id ON tutor_rate_history (tutor_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_tutor_payouts_tutor_id ON tutor_payouts (tutor_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_users_role ON users (role)",
                 ):
                     try:
                         await conn.execute(text(sql))
