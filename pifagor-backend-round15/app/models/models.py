@@ -323,6 +323,22 @@ class ParentContract(Base):
 
     parent: Mapped[Optional["ParentProfile"]] = relationship(back_populates="contracts")
     child: Mapped[Optional["ChildProfile"]] = relationship()
+    extra_children: Mapped[List["ParentContractChild"]] = relationship(back_populates="contract")
+
+
+class ParentContractChild(Base):
+    """Явная привязка договора сразу к нескольким ученикам (брат/сестра
+    и т.п., один договор на обоих). ParentContract.child_id по-прежнему
+    хранит "основного" ученика для обратной совместимости, а здесь —
+    полный список всех привязанных."""
+    __tablename__ = "parent_contract_children"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("parent_contracts.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+
+    contract: Mapped["ParentContract"] = relationship(back_populates="extra_children")
+    child: Mapped["ChildProfile"] = relationship()
 
 
 # ─── Payments ─────────────────────────────────────────────────────────────────

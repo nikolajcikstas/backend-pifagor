@@ -25,7 +25,7 @@ from app.models.models import (
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
     TutorProfile, TutorSubject, Subject, TutorDocument, TutorContract, Act,
     Homework, Report, Material, ParentContract, Payment, Comment, TestResult, Review,
-    TutorPayout, EmailReceiptSplit, PayerChildLink, TutorRateHistory,
+    TutorPayout, EmailReceiptSplit, PayerChildLink, TutorRateHistory, ParentContractChild,
 )
 from app.schemas.schemas import (
     InviteCodeCreate, InviteCodeResponse,
@@ -741,6 +741,15 @@ async def _mark_child_as_active_client(db: AsyncSession, child_id: int) -> None:
 def _serialize_contract(contract: ParentContract) -> dict:
     parent_user = contract.parent.user if contract.parent else None
     child_user = contract.child.user if contract.child else None
+    extra = [ec for ec in (contract.extra_children or []) if ec.child and ec.child.user]
+    if extra:
+        student_name = ", ".join(
+            f"{ec.child.user.last_name} {ec.child.user.first_name}".strip() for ec in extra
+        )
+        child_ids = [ec.child_id for ec in extra]
+    else:
+        student_name = f"{child_user.last_name} {child_user.first_name}".strip() if child_user else ""
+        child_ids = [contract.child_id] if contract.child_id else []
     return {
         "id": f"parent-{contract.id}",
         "db_id": contract.id,
@@ -762,8 +771,9 @@ def _serialize_contract(contract: ParentContract) -> dict:
         "email": contract.parent_email or (parent_user.email if parent_user else ""),
         "recommendation": contract.recommendation,
         "recommendation_as_of": contract.recommendation_as_of.isoformat() if contract.recommendation_as_of else None,
-        "student_name": f"{child_user.last_name} {child_user.first_name}".strip() if child_user else "",
+        "student_name": student_name,
         "child_id": contract.child_id,
+        "child_ids": child_ids,
         "total_amount": contract.total_amount,
         "file_url": contract.signed_file_url or contract.file_url,
     }
@@ -893,6 +903,7 @@ async def _process_one_contract_file(
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
+            joinedload(ParentContract.extra_children).joinedload(ParentContractChild.child).joinedload(ChildProfile.user),
         ).where(ParentContract.id == contract.id)
     )
     row = _serialize_contract(result.unique().scalar_one())
@@ -1026,44 +1037,60 @@ async def update_contract_fields(
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
+            joinedload(ParentContract.extra_children).joinedload(ParentContractChild.child).joinedload(ChildProfile.user),
         ).where(ParentContract.id == contract_id)
     )
     return _serialize_contract(result.unique().scalar_one())
 
 
 class ContractAssignChild(BaseModel):
-    child_id: int
+    child_ids: List[int]
 
 
 @router.post("/contracts/{contract_id}/assign-child", dependencies=[Depends(require_admin)])
 async def assign_contract_child(
     contract_id: int, payload: ContractAssignChild, db: AsyncSession = Depends(get_db)
 ):
-    """Вручную привязать договор к ученику, если автоматическая привязка не сработала."""
+    """Вручную привязать договор к одному или нескольким ученикам (например,
+    брат и сестра на одном договоре), если автоматическая привязка не сработала."""
+    if not payload.child_ids:
+        raise HTTPException(status_code=400, detail="Нужно указать хотя бы одного ученика")
+
     result = await db.execute(select(ParentContract).where(ParentContract.id == contract_id))
     contract = result.scalar_one_or_none()
     if not contract:
         raise HTTPException(status_code=404, detail="Договор не найден")
 
-    child_res = await db.execute(select(ChildProfile).where(ChildProfile.id == payload.child_id))
-    child = child_res.scalar_one_or_none()
-    if not child:
-        raise HTTPException(status_code=404, detail="Ученик не найден")
+    children_res = await db.execute(
+        select(ChildProfile.id).where(ChildProfile.id.in_(payload.child_ids))
+    )
+    valid_ids = {row[0] for row in children_res.all()}
+    if valid_ids != set(payload.child_ids):
+        raise HTTPException(status_code=404, detail="Один или несколько учеников не найдены")
 
-    contract.child_id = child.id
+    await db.execute(
+        ParentContractChild.__table__.delete().where(ParentContractChild.contract_id == contract_id)
+    )
+    for cid in payload.child_ids:
+        db.add(ParentContractChild(contract_id=contract_id, child_id=cid))
+
+    primary_id = payload.child_ids[0]
+    contract.child_id = primary_id
     parent_link_res = await db.execute(
-        select(ParentChild).where(ParentChild.child_id == child.id)
+        select(ParentChild).where(ParentChild.child_id == primary_id)
     )
     parent_link = parent_link_res.scalars().first()
     contract.parent_id = parent_link.parent_id if parent_link else None
     contract.match_status = "matched"
-    await _mark_child_as_active_client(db, child.id)
+    for cid in payload.child_ids:
+        await _mark_child_as_active_client(db, cid)
     await db.commit()
 
     result = await db.execute(
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
+            joinedload(ParentContract.extra_children).joinedload(ParentContractChild.child).joinedload(ChildProfile.user),
         ).where(ParentContract.id == contract_id)
     )
     return _serialize_contract(result.unique().scalar_one())
@@ -1093,6 +1120,7 @@ async def recalculate_contract(
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
+            joinedload(ParentContract.extra_children).joinedload(ParentContractChild.child).joinedload(ChildProfile.user),
         ).where(ParentContract.id == contract_id)
     )
     row = _serialize_contract(result.unique().scalar_one())
@@ -1134,6 +1162,7 @@ async def contracts_dashboard(db: AsyncSession = Depends(get_db)):
         select(ParentContract).options(
             joinedload(ParentContract.parent).joinedload(ParentProfile.user),
             joinedload(ParentContract.child).joinedload(ChildProfile.user),
+            joinedload(ParentContract.extra_children).joinedload(ParentContractChild.child).joinedload(ChildProfile.user),
         )
     )
     return [_serialize_contract(c) for c in parent_result.scalars().unique().all()]
