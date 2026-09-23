@@ -180,6 +180,11 @@ async def _init_database_schema() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_tutor_rate_history_tutor_id ON tutor_rate_history (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_tutor_payouts_tutor_id ON tutor_payouts (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_users_role ON users (role)",
+                    # Файл договора хранится прямо в БД — переживает передеплой
+                    # на Render (локальный диск эфемерный и очищается при каждом деплое).
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_data BYTEA",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_mime VARCHAR(150)",
+                    "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_name VARCHAR(255)",
                 ):
                     try:
                         await conn.execute(text(sql))

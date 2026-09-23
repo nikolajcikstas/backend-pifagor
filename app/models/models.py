@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     Boolean, Date, DateTime, Enum, ForeignKey,
-    Integer, String, Text, Time, Float, func
+    Integer, String, Text, Time, Float, LargeBinary, func
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -301,6 +301,12 @@ class ParentContract(Base):
     signed_file_url: Mapped[Optional[str]] = mapped_column(String(500))
     is_signed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Само содержимое файла договора хранится в БД (не на диске сервера —
+    # диск Render эфемерный и очищается при каждом деплое, из-за чего файлы
+    # переставали открываться). Отдаётся родителю через /parent/contract/{id}/file.
+    file_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    file_mime: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # ── Распознанные из текста договора данные ──
     contract_number: Mapped[Optional[str]] = mapped_column(String(50))

@@ -432,138 +432,8 @@ async def finance_report(
         db: AsyncSession = Depends(get_db),
 ):
     """Finance report per student. If week_start is provided, limit it to that week."""
-    week_end = week_start + timedelta(days=6) if week_start else None
-    lesson_filters = [Lesson.status == LessonStatus.completed]
-    receipt_filters = [EmailReceipt.child_id.isnot(None)]
-    # Тот же диапазон дат, но без требования наличия child_id — нужен для
-    # подсчёта общей суммы семьи по чекам, у которых child_id ещё не проставлен.
-    pooled_receipt_filters = []
-
-    if week_start and week_end:
-        lesson_filters.extend([
-            Lesson.date >= week_start,
-            Lesson.date <= week_end,
-        ])
-        receipt_filters.extend([
-            cast(EmailReceipt.payment_date, Date) >= week_start,
-            cast(EmailReceipt.payment_date, Date) <= week_end,
-        ])
-        pooled_receipt_filters.extend([
-            cast(EmailReceipt.payment_date, Date) >= week_start,
-            cast(EmailReceipt.payment_date, Date) <= week_end,
-        ])
-
-    # Completed lessons in the selected range — с датами (нужны для
-    # распределения общего платежа семьи по хронологии занятий).
-    lessons_res = await db.execute(
-        select(Lesson.child_id, Lesson.date).where(*lesson_filters)
-    )
-    lessons_by_child: dict[int, int] = {}
-    lesson_dates_by_child: dict[int, list] = {}
-    for cid, ldate in lessons_res.all():
-        lessons_by_child[cid] = lessons_by_child.get(cid, 0) + 1
-        lesson_dates_by_child.setdefault(cid, []).append(ldate)
-
-    # Paid receipts in the selected range — если у ученика явно указана
-    # «дата начала учёта» (для реально перенесённых со старой платформы),
-    # чеки раньше этой даты не считаются. Если дата не указана — считаются
-    # все чеки без ограничений (это дефолт для всех обычных учеников).
-    receipts_res = await db.execute(
-        select(EmailReceipt.child_id, func.sum(EmailReceipt.amount).label("total"))
-        .join(ChildProfile, EmailReceipt.child_id == ChildProfile.id)
-        .where(
-            *receipt_filters,
-            or_(
-                ChildProfile.accounting_start_date.is_(None),
-                func.coalesce(EmailReceipt.payment_date, EmailReceipt.created_at) >= ChildProfile.accounting_start_date,
-            ),
-        )
-        .group_by(EmailReceipt.child_id)
-    )
-    amounts_by_child = {row.child_id: row.total for row in receipts_res}
-
-    # Семьи (брат/сестра и т.п.), привязанные к одному плательщику —
-    # считаем их занятия и оплаты общим пулом, без каких-либо дат:
-    # берём ВСЕ чеки этого плательщика (сколько бы их ни было и когда бы
-    # они ни пришли) и распределяем эту сумму по всем занятиям обоих детей
-    # по порядку дат — чьё занятие раньше, тому в первую очередь и засчитан
-    # платёж. Это заменяет прежнюю схему с ручным делением суммы пополам.
-    links_res = await db.execute(select(PayerChildLink))
-    group_children: dict[str, set] = {}
-    for link in links_res.scalars().all():
-        group_children.setdefault(link.payer_name_normalized, set()).add(link.child_id)
-    groups = {key: ids for key, ids in group_children.items() if len(ids) > 1}
-
-    if groups:
-        all_receipts_query = select(EmailReceipt)
-        if pooled_receipt_filters:
-            all_receipts_query = all_receipts_query.where(*pooled_receipt_filters)
-        all_receipts_res = await db.execute(all_receipts_query)
-        pooled_paid: dict[str, float] = {}
-        for r in all_receipts_res.scalars().all():
-            norm = _normalize_name(r.payer_name)
-            if norm in groups:
-                pooled_paid[norm] = pooled_paid.get(norm, 0.0) + r.amount
-
-        group_child_ids = {cid for ids in groups.values() for cid in ids}
-        prices_res = await db.execute(
-            select(ChildProfile.id, ChildProfile.lesson_price).where(ChildProfile.id.in_(group_child_ids))
-        )
-        price_by_child = {row[0]: (row[1] or 40) for row in prices_res.all()}
-
-        for group_key, child_ids in groups.items():
-            combined = []
-            for cid in child_ids:
-                for ldate in lesson_dates_by_child.get(cid, []):
-                    combined.append((ldate, cid))
-            combined.sort(key=lambda pair: pair[0])
-
-            remaining = pooled_paid.get(group_key, 0.0)
-            paid_for_child: dict[int, float] = {cid: 0.0 for cid in child_ids}
-            for _ldate, cid in combined:
-                price = price_by_child.get(cid, 40)
-                if remaining + 1e-9 >= price:
-                    paid_for_child[cid] += price
-                    remaining -= price
-                else:
-                    break  # деньги закончились — дальнейшие занятия (по хронологии) остаются неоплаченными
-
-            for cid in child_ids:
-                amounts_by_child[cid] = paid_for_child[cid]
-
-    all_child_ids = set(lessons_by_child) | set(amounts_by_child)
-
-    if not all_child_ids:
-        return []
-
-    cp_res = await db.execute(
-        select(ChildProfile)
-        .options(joinedload(ChildProfile.user))
-        .where(ChildProfile.id.in_(all_child_ids))
-    )
-    children = {cp.id: cp for cp in cp_res.scalars().unique()}
-
-    rows: List[StudentFinanceRow] = []
-    for child_id in sorted(all_child_ids):
-        cp = children.get(child_id)
-        if not cp or not cp.user:
-            continue
-        u = cp.user
-        conducted = lessons_by_child.get(child_id, 0)
-        amount_paid = amounts_by_child.get(child_id, 0.0) or 0.0
-        lesson_price = cp.lesson_price or 40
-        lessons_paid = int(amount_paid // lesson_price) if lesson_price else 0
-
-        rows.append(StudentFinanceRow(
-            child_id=child_id,
-            student_name=f"{u.last_name} {u.first_name}".strip(),
-            lessons_conducted=conducted,
-            lessons_paid=lessons_paid,
-            amount_paid=round(amount_paid, 2),
-            lesson_price=round(lesson_price, 2),
-        ))
-
-    return rows
+    from app.services.finance_report import compute_finance_rows
+    return await compute_finance_rows(db, week_start=week_start)
 
 
 @router.patch("/students/{user_id}", dependencies=[Depends(require_admin)])
@@ -939,6 +809,9 @@ async def _process_one_contract_file(
         parent_id=parent_id,
         child_id=child_id,
         file_url=f"/uploads/{stored_name}",
+        file_data=contents,
+        file_mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        file_name=filename or stored_name,
         is_signed=True,
         contract_number=parsed.get("contract_number"),
         client_name_raw=match_name,

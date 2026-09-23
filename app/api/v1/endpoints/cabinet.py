@@ -12,16 +12,16 @@ from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.models import (
     Report, Homework, Payment, Test, TestQuestion, TestAnswer,
-    TestResult, Notification, Comment, Act, ParentContract, TutorContract,
+    TestResult, Notification, Act, ParentContract, TutorContract,
     User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument, ChildProfile,
-    TutorPayout,
+    TutorPayout, ParentChild, EmailReceipt,
 )
 from app.schemas.schemas import (
     ReportCreate, ReportOut,
     HomeworkCreate, HomeworkOut,
     PaymentCreate, PaymentOut,
     TestCreate, TestOut, TestResultCreate, TestResultOut,
-    NotificationOut, CommentCreate, CommentOut,
+    NotificationOut,
     ActOut, ParentContractOut, TutorContractOut,
     TutorDocumentOut,
 )
@@ -256,6 +256,55 @@ async def mark_payment_paid(
     return {"ok": True}
 
 
+@router.get("/finance/parent")
+async def get_parent_finance(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Реальная сумма оплаченных/неоплаченных занятий и задолженность для
+    ЛК родителя — считается той же логикой, что и админский finance-report
+    (включая учёт «семейных» платежей на нескольких детей одного плательщика),
+    чтобы цифры совпадали с СРМ."""
+    from app.services.finance_report import compute_finance_rows
+
+    if current_user.role != RoleEnum.parent or not current_user.parent_profile:
+        raise HTTPException(status_code=403, detail="Only parents can view this")
+
+    child_ids_res = await db.execute(
+        select(ParentChild.child_id).where(ParentChild.parent_id == current_user.parent_profile.id)
+    )
+    child_ids = [row[0] for row in child_ids_res.all()]
+    if not child_ids:
+        return {"lessons_paid": 0, "lessons_unpaid": 0, "debt": 0.0, "receipts": []}
+
+    rows = await compute_finance_rows(db, child_ids=child_ids)
+    lessons_paid = sum(r.lessons_paid for r in rows)
+    lessons_unpaid = sum(max(0, r.lessons_conducted - r.lessons_paid) for r in rows)
+    debt = sum(max(0.0, r.lessons_conducted * r.lesson_price - r.amount_paid) for r in rows)
+
+    receipts_res = await db.execute(
+        select(EmailReceipt)
+        .where(EmailReceipt.child_id.in_(child_ids))
+        .order_by(EmailReceipt.payment_date.desc(), EmailReceipt.created_at.desc())
+    )
+    receipts = [
+        {
+            "id": r.id,
+            "amount": r.amount,
+            "payment_date": r.payment_date,
+            "created_at": r.created_at,
+        }
+        for r in receipts_res.scalars().all()
+    ]
+
+    return {
+        "lessons_paid": lessons_paid,
+        "lessons_unpaid": lessons_unpaid,
+        "debt": round(debt, 2),
+        "receipts": receipts,
+    }
+
+
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
 @router.get("/tests", response_model=List[TestOut])
@@ -365,23 +414,6 @@ async def mark_read(
     notif.is_read = True
     await db.commit()
     return {"ok": True}
-
-
-# ─── Comments ─────────────────────────────────────────────────────────────────
-
-@router.post("/comments", response_model=CommentOut, status_code=201)
-async def create_comment(
-    data: CommentCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    if current_user.role != RoleEnum.parent or not current_user.parent_profile:
-        raise HTTPException(status_code=403, detail="Only parents can comment")
-    comment = Comment(**data.model_dump(), parent_id=current_user.parent_profile.id)
-    db.add(comment)
-    await db.commit()
-    await db.refresh(comment)
-    return comment
 
 
 # ─── Acts ─────────────────────────────────────────────────────────────────────
@@ -558,6 +590,18 @@ async def download_parent_contract(
         if contract.parent_id != current_user.parent_profile.id:
             raise HTTPException(status_code=403, detail="Forbidden")
 
+    # Файл хранится в БД (переживает деплои на Render, в отличие от локального
+    # диска) — отдаём его напрямую, "inline", чтобы браузер открывал файл,
+    # а не всегда принудительно скачивал его.
+    if contract.file_data:
+        return Response(
+            content=contract.file_data,
+            media_type=contract.file_mime or "application/octet-stream",
+            headers={
+                "Content-Disposition": f'inline; filename="{contract.file_name or "contract"}"'
+            },
+        )
+
     file_url = contract.signed_file_url or contract.file_url
     if not file_url:
         raise HTTPException(status_code=404, detail="Contract file not found")
@@ -565,6 +609,7 @@ async def download_parent_contract(
         file_path = Path(__file__).resolve().parents[3] / file_url.lstrip("/")
         if file_path.exists():
             return FileResponse(file_path, media_type="application/pdf", filename=file_path.name)
+        raise HTTPException(status_code=404, detail="Файл договора не сохранился на сервере — загрузите его в админке заново")
     return RedirectResponse(file_url)
 
 
@@ -636,21 +681,6 @@ async def download_tutor_contract(
             return FileResponse(file_path, media_type="application/pdf", filename=file_path.name)
     return RedirectResponse(file_url)
 
-
-# ─── GET Comments (for parent) ────────────────────────────────────────────────
-
-@router.get("/comments", response_model=List[CommentOut])
-async def list_comments(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    q = select(Comment)
-    if current_user.role == RoleEnum.parent and current_user.parent_profile:
-        q = q.where(Comment.parent_id == current_user.parent_profile.id)
-    elif current_user.role == RoleEnum.tutor and current_user.tutor_profile:
-        q = q.where(Comment.tutor_id == current_user.tutor_profile.id)
-    result = await db.execute(q.order_by(Comment.created_at.desc()))
-    return result.scalars().all()
 
 
 # ─── Tutor Finance Stats ───────────────────────────────────────────────────────
