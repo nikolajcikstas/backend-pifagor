@@ -43,6 +43,32 @@ async def compute_finance_rows(
             cast(EmailReceipt.payment_date, Date) <= week_end,
         ])
 
+    # Если запрошены конкретные ученики (например, ЛК одного родителя) —
+    # сначала расширяем набор до «семьи» (братья/сёстры на одном плательщике),
+    # а потом фильтруем ВСЕ запросы этим набором в самой базе. Раньше здесь
+    # всегда читались занятия и чеки ВСЕХ учеников системы, а фильтрация по
+    # child_ids происходила только в самом конце — для ЛК одного родителя это
+    # означало пересчёт по всей базе ради 1-2 строк, и чем больше учеников,
+    # тем медленнее грузился личный кабинет.
+    scoped_child_ids: Optional[set] = None
+    if child_ids is not None:
+        scoped_child_ids = set(child_ids)
+        family_links_res = await db.execute(
+            select(PayerChildLink.payer_name_normalized).where(
+                PayerChildLink.child_id.in_(scoped_child_ids)
+            )
+        )
+        payer_keys = {row[0] for row in family_links_res.all()}
+        if payer_keys:
+            expand_res = await db.execute(
+                select(PayerChildLink.child_id).where(
+                    PayerChildLink.payer_name_normalized.in_(payer_keys)
+                )
+            )
+            scoped_child_ids |= {row[0] for row in expand_res.all()}
+        lesson_filters.append(Lesson.child_id.in_(scoped_child_ids))
+        receipt_filters.append(EmailReceipt.child_id.in_(scoped_child_ids))
+
     lessons_res = await db.execute(
         select(Lesson.child_id, Lesson.date).where(*lesson_filters)
     )
@@ -66,7 +92,10 @@ async def compute_finance_rows(
     )
     amounts_by_child = {row.child_id: row.total for row in receipts_res}
 
-    links_res = await db.execute(select(PayerChildLink))
+    links_query = select(PayerChildLink)
+    if scoped_child_ids is not None:
+        links_query = links_query.where(PayerChildLink.child_id.in_(scoped_child_ids))
+    links_res = await db.execute(links_query)
     group_children: dict[str, set] = {}
     for link in links_res.scalars().all():
         group_children.setdefault(link.payer_name_normalized, set()).add(link.child_id)
