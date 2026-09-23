@@ -581,7 +581,6 @@ async def get_parent_profile(
             "house": contract.house if contract else None,
             "start_date": contract.start_date if contract else None,
             "end_date": contract.end_date if contract else None,
-            "total_amount": contract.total_amount if contract else None,
         } if contract else None,
     }
 
