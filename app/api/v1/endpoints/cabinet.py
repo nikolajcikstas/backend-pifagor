@@ -17,7 +17,7 @@ from app.models.models import (
     TutorPayout, ParentChild, EmailReceipt, ParentProfile,
 )
 from app.schemas.schemas import (
-    ReportCreate, ReportOut,
+    ReportCreate, ReportOut, ReportUpdate,
     HomeworkCreate, HomeworkOut,
     PaymentCreate, PaymentOut,
     TestCreate, TestOut, TestResultCreate, TestResultOut,
@@ -57,29 +57,102 @@ async def _notify_admins(db: AsyncSession, title: str, body: str) -> None:
 
 # ─── Reports ──────────────────────────────────────────────────────────────────
 
+REPORT_STATUSES = ("pending", "submitted", "approved")
+
+
+def _report_query():
+    return select(Report).options(
+        selectinload(Report.child).selectinload(ChildProfile.user),
+        selectinload(Report.tutor).selectinload(TutorProfile.user),
+        selectinload(Report.subject),
+        selectinload(Report.lesson),
+    )
+
+
+def _report_to_dict(r: Report) -> dict:
+    return {
+        "id": r.id,
+        "tutor_id": r.tutor_id,
+        "child_id": r.child_id,
+        "subject_id": r.subject_id,
+        "lesson_id": r.lesson_id,
+        "content": r.content or "",
+        "lesson_count": r.lesson_count or 5,
+        "file_url": r.file_url,
+        "material_score": r.material_score,
+        "material_comment": r.material_comment,
+        "successes": r.successes,
+        "difficulties": r.difficulties,
+        "homework_status": r.homework_status,
+        "homework_comment": r.homework_comment,
+        "engagement_score": r.engagement_score,
+        "status": r.status or "approved",
+        "approved_at": r.approved_at,
+        "student_name": _user_name(r.child.user if r.child else None) or None,
+        "tutor_name": _user_name(r.tutor.user if r.tutor else None) or None,
+        "subject_name": r.subject.name if r.subject else None,
+        "lesson_date": r.lesson.date if r.lesson else None,
+        "created_at": r.created_at,
+    }
+
+
+def _build_report_content(r) -> str:
+    """Текст отчёта из заполненных полей формы — тем же форматом, что и раньше."""
+    hw = f"Домашние задания: {r.homework_status or '-'}. {r.homework_comment or ''}".strip()
+    return "\n".join([
+        f"Усвоение материала: {r.material_score or '-'}/5.",
+        f"Что прошли: {r.material_comment or '-'}",
+        f"Успехи: {r.successes or '-'}",
+        f"Зона роста: {r.difficulties or '-'}",
+        hw,
+        f"Активность: {r.engagement_score or '-'}/5.",
+    ])
+
+
+async def _load_report(db: AsyncSession, report_id: int) -> Report | None:
+    res = await db.execute(_report_query().where(Report.id == report_id))
+    return res.scalars().unique().one_or_none()
+
+
+# ─── Reports ──────────────────────────────────────────────────────────────────
+
 @router.get("/reports", response_model=List[ReportOut])
 async def list_reports(
     child_id: Optional[int] = Query(None),
+    tutor_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = select(Report)
+    q = _report_query()
     if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
         q = q.where(Report.tutor_id == current_user.tutor_profile.id)
+        if child_id:
+            q = q.where(Report.child_id == child_id)
     elif current_user.role == RoleEnum.child and current_user.child_profile:
-        q = q.where(Report.child_id == current_user.child_profile.id)
+        q = q.where(Report.child_id == current_user.child_profile.id, Report.status == "approved")
     elif current_user.role == RoleEnum.parent and current_user.parent_profile:
         child_ids = [pc.child_id for pc in current_user.parent_profile.children]
         if child_id and child_id not in child_ids:
             raise HTTPException(status_code=403, detail="Недостаточно прав")
-        q = q.where(Report.child_id == (child_id or child_ids[0]) if child_id else Report.child_id.in_(child_ids))
+        if not child_ids:
+            return []
+        # Родитель видит только отчёты, одобренные администратором
+        q = q.where(
+            Report.child_id == child_id if child_id else Report.child_id.in_(child_ids),
+            Report.status == "approved",
+        )
     elif current_user.role == RoleEnum.admin:
         if child_id:
             q = q.where(Report.child_id == child_id)
+        if tutor_id:
+            q = q.where(Report.tutor_id == tutor_id)
     else:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
+    if status in REPORT_STATUSES and current_user.role in (RoleEnum.admin, RoleEnum.tutor):
+        q = q.where(Report.status == status)
     result = await db.execute(q.order_by(Report.created_at.desc()))
-    return result.scalars().all()
+    return [_report_to_dict(r) for r in result.scalars().unique().all()]
 
 
 @router.post("/reports", response_model=ReportOut, status_code=201)
@@ -99,17 +172,122 @@ async def create_report(
             raise HTTPException(status_code=403, detail="Можно писать отчёты только по своим ученикам")
     elif not current_user.tutor_profile:
         raise HTTPException(status_code=400, detail="Отчёт может создать только репетитор")
-    report = Report(**data.model_dump(), tutor_id=current_user.tutor_profile.id)
-    db.add(report)
+    if not (data.content or "").strip():
+        raise HTTPException(status_code=400, detail="Заполните отчёт")
+
+    report = None
+    if data.lesson_id:
+        # По этому занятию уже есть отложенный/неодобренный отчёт — заполняем его, а не создаём второй
+        report = (await db.execute(
+            select(Report)
+            .where(Report.lesson_id == data.lesson_id, Report.tutor_id == current_user.tutor_profile.id, Report.status != "approved")
+            .order_by(Report.id)
+        )).scalars().first()
+        if not report:
+            already_approved = await db.scalar(
+                select(func.count(Report.id)).where(
+                    Report.lesson_id == data.lesson_id, Report.tutor_id == current_user.tutor_profile.id, Report.status == "approved"
+                )
+            )
+            if already_approved:
+                raise HTTPException(status_code=400, detail="Отчёт по этому занятию уже одобрен")
+    if report:
+        for field, value in data.model_dump().items():
+            setattr(report, field, value)
+        report.status = "submitted"
+    else:
+        report = Report(**data.model_dump(), tutor_id=current_user.tutor_profile.id, status="submitted")
+        db.add(report)
     child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(selectinload(ChildProfile.user)))
     await _notify_admins(
         db,
-        "Новый отчёт",
-        f"Репетитор {_user_name(current_user)} добавил отчёт по ученику {_user_name(child.user if child else None)}.",
+        "Новый отчёт на проверку",
+        f"Репетитор {_user_name(current_user)} заполнил отчёт по ученику {_user_name(child.user if child else None)}. Проверьте и одобрите его в разделе «Отчёты».",
     )
     await db.commit()
-    await db.refresh(report)
-    return report
+    return _report_to_dict(await _load_report(db, report.id))
+
+
+@router.patch("/reports/{report_id}", response_model=ReportOut)
+async def update_report(
+    report_id: int,
+    data: ReportUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_tutor),
+):
+    """Репетитор заполняет/исправляет свой отложенный или ещё не одобренный
+    отчёт; админ может исправить любой отчёт."""
+    report = await db.scalar(select(Report).where(Report.id == report_id))
+    if not report:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    is_admin = current_user.role == RoleEnum.admin
+    if not is_admin:
+        if not current_user.tutor_profile or report.tutor_id != current_user.tutor_profile.id:
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+        if report.status == "approved":
+            raise HTTPException(status_code=400, detail="Отчёт уже одобрен администратором — изменить его может только администратор")
+    updates = data.model_dump(exclude_none=True)
+    for field, value in updates.items():
+        setattr(report, field, value)
+    form_fields = ("material_comment", "successes", "difficulties", "material_score", "engagement_score", "homework_status")
+    if not (updates.get("content") or "").strip() and any(f in updates for f in form_fields):
+        report.content = _build_report_content(report)
+    leaving_pending = report.status == "pending"
+    if leaving_pending and not all((getattr(report, f) or "").strip() for f in ("material_comment", "successes", "difficulties")):
+        raise HTTPException(status_code=400, detail="Заполните основные поля отчёта: что прошли, успехи и зону роста")
+    if not (report.content or "").strip():
+        raise HTTPException(status_code=400, detail="Отчёт не может быть пустым")
+    if not is_admin:
+        was_pending = report.status == "pending"
+        report.status = "submitted"
+        if was_pending:
+            await _notify_admins(db, "Новый отчёт на проверку",
+                                 f"Репетитор {_user_name(current_user)} заполнил отложенный отчёт. Проверьте его в разделе «Отчёты».")
+    elif report.status == "pending":
+        report.status = "submitted"
+    await db.commit()
+    return _report_to_dict(await _load_report(db, report_id))
+
+
+@router.post("/reports/{report_id}/approve", response_model=ReportOut)
+async def approve_report(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Админ одобряет отчёт — после этого он появляется в кабинете родителя."""
+    report = await _load_report(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    if report.status == "pending" or not (report.content or "").strip():
+        raise HTTPException(status_code=400, detail="Отчёт ещё не заполнен репетитором")
+    report.status = "approved"
+    report.approved_at = datetime.utcnow()
+    parents = await db.execute(
+        select(ParentProfile.user_id)
+        .join(ParentChild, ParentChild.parent_id == ParentProfile.id)
+        .where(ParentChild.child_id == report.child_id)
+    )
+    student = _user_name(report.child.user if report.child else None)
+    for parent_user_id in parents.scalars().all():
+        await _notify(db, parent_user_id, "Новый отчёт репетитора",
+                      f"Репетитор подготовил отчёт по ученику {student}. Его можно посмотреть в разделе «Отчёты».")
+    await db.commit()
+    return _report_to_dict(await _load_report(db, report_id))
+
+
+@router.delete("/reports/{report_id}", status_code=204)
+async def delete_report(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    report = await db.scalar(select(Report).where(Report.id == report_id))
+    if not report:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    await db.delete(report)
+    await db.commit()
+    return Response(status_code=204)
 
 
 # ─── Tutor documents (полученные от админа) ────────────────────────────────────
@@ -423,16 +601,45 @@ async def get_test_results(
 
 @router.get("/notifications", response_model=List[NotificationOut])
 async def list_notifications(
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.models.models import Notification
+    # Раньше отдавались ВСЕ уведомления (у админа их тысячи) — это тормозило
+    # каждое открытие кабинета. Теперь только последние.
     result = await db.execute(
         select(Notification)
         .where(Notification.user_id == current_user.id)
         .order_by(Notification.created_at.desc())
+        .limit(limit)
     )
     return result.scalars().all()
+
+
+@router.get("/notifications/unread-count")
+async def unread_notifications_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    count = await db.scalar(
+        select(func.count(Notification.id)).where(Notification.user_id == current_user.id, Notification.is_read == False)
+    ) or 0
+    return {"count": count}
+
+
+@router.patch("/notifications/read-all")
+async def mark_all_notifications_read(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from sqlalchemy import update as sa_update
+    await db.execute(
+        sa_update(Notification)
+        .where(Notification.user_id == current_user.id, Notification.is_read == False)
+        .values(is_read=True)
+    )
+    await db.commit()
+    return {"ok": True}
 
 
 @router.patch("/notifications/{notif_id}/read")

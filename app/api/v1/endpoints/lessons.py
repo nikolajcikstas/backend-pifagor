@@ -89,29 +89,106 @@ def _can_access_lesson(user: User, lesson: Lesson) -> bool:
     return False
 
 
-async def _require_report_for_fifth_lesson(db: AsyncSession, lesson: Lesson) -> None:
+MAX_PENDING_REPORTS = 3
+
+LIMIT_UPDATE_MSG = (
+    "У вас уже 3 незаполненных отчёта. Заполните отчёт по этому занятию сейчас "
+    "или сначала заполните отложенные отчёты (раздел «Финансы» → «Отчёты»)."
+)
+LIMIT_CREATE_MSG = (
+    "У вас уже 3 незаполненных отчёта. Сначала заполните их (раздел «Финансы» → «Отчёты»), "
+    "либо добавьте занятие со статусом «Предстоит» и отметьте проведённым позже."
+)
+
+
+async def _report_needed(db: AsyncSession, lesson: Lesson) -> bool:
+    """Отчёт нужен после каждого 5-го проведённого занятия КОНКРЕТНОГО репетитора
+    с КОНКРЕТНЫМ учеником (если ученик занимается физикой и химией у разных
+    репетиторов, каждый считает только свои занятия)."""
     completed_before = await db.scalar(
         select(func.count(Lesson.id)).where(
+            Lesson.tutor_id == lesson.tutor_id,
             Lesson.child_id == lesson.child_id,
             Lesson.status == LessonStatus.completed,
             Lesson.id != lesson.id,
         )
     ) or 0
-    next_number = completed_before + 1
-    if next_number % 5 != 0:
-        return
-
+    if (completed_before + 1) % 5 != 0:
+        return False
     report_exists = await db.scalar(
-        select(func.count(Report.id)).where(
-            Report.child_id == lesson.child_id,
-            Report.lesson_id == lesson.id,
-        )
+        select(func.count(Report.id)).where(Report.lesson_id == lesson.id)
     ) or 0
-    if not report_exists:
-        raise HTTPException(
-            status_code=400,
-            detail="Для каждого 5-го занятия ученика нужно сначала заполнить отчёт.",
-        )
+    return not report_exists
+
+
+async def _pending_reports_count(db: AsyncSession, tutor_id: int) -> int:
+    return await db.scalar(
+        select(func.count(Report.id)).where(Report.tutor_id == tutor_id, Report.status == "pending")
+    ) or 0
+
+
+async def _create_pending_report_if_needed(
+    db: AsyncSession, lesson: Lesson, current_user: User, limit_message: str
+) -> Report | None:
+    """Занятие стало «Проведено». Если это 5-е (10-е, …) занятие пары
+    репетитор+ученик и отчёта ещё нет — создаём «отложенный» отчёт, который
+    репетитор заполнит сразу или позже. Отложенных может быть не больше трёх:
+    дальше репетитор обязан заполнить отчёт, прежде чем отмечать новые занятия."""
+    if not await _report_needed(db, lesson):
+        return None
+    if current_user.role == RoleEnum.tutor:
+        if await _pending_reports_count(db, lesson.tutor_id) >= MAX_PENDING_REPORTS:
+            raise HTTPException(status_code=400, detail=limit_message)
+    report = Report(
+        tutor_id=lesson.tutor_id,
+        child_id=lesson.child_id,
+        subject_id=lesson.subject_id,
+        lesson_id=lesson.id,
+        content="",
+        lesson_count=5,
+        status="pending",
+    )
+    db.add(report)
+    await db.flush()
+    if current_user.role == RoleEnum.admin:
+        tutor_user_id = await db.scalar(select(TutorProfile.user_id).where(TutorProfile.id == lesson.tutor_id))
+        await _notify(db, tutor_user_id, "Нужно заполнить отчёт",
+                      f"Занятие {lesson.date} отмечено проведённым — это 5-е занятие с учеником, заполните отчёт.")
+    return report
+
+
+async def _drop_pending_reports(db: AsyncSession, lesson_id: int) -> None:
+    res = await db.execute(select(Report).where(Report.lesson_id == lesson_id, Report.status == "pending"))
+    for r in res.scalars().all():
+        await db.delete(r)
+
+
+def _role_filters(current_user: User, tutor_id: Optional[int], child_id: Optional[int]):
+    """Условия видимости занятий для роли. None — у пользователя нет занятий."""
+    filters = []
+    if current_user.role == RoleEnum.tutor:
+        if not current_user.tutor_profile:
+            return None
+        filters.append(Lesson.tutor_id == current_user.tutor_profile.id)
+    elif current_user.role == RoleEnum.child:
+        if not current_user.child_profile:
+            return None
+        filters.append(Lesson.child_id == current_user.child_profile.id)
+    elif current_user.role == RoleEnum.parent:
+        if not current_user.parent_profile:
+            return None
+        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        if not child_ids:
+            return None
+        filters.append(Lesson.child_id.in_(child_ids))
+    elif current_user.role == RoleEnum.admin:
+        if tutor_id:
+            filters.append(Lesson.tutor_id == tutor_id)
+        if child_id:
+            filters.append(Lesson.child_id == child_id)
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    return filters
 
 
 @router.get("/", response_model=List[dict])
@@ -125,30 +202,9 @@ async def get_lessons(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    filters = []
-
-    if current_user.role == RoleEnum.tutor:
-        if not current_user.tutor_profile:
-            return []
-        filters.append(Lesson.tutor_id == current_user.tutor_profile.id)
-    elif current_user.role == RoleEnum.child:
-        if not current_user.child_profile:
-            return []
-        filters.append(Lesson.child_id == current_user.child_profile.id)
-    elif current_user.role == RoleEnum.parent:
-        if not current_user.parent_profile:
-            return []
-        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
-        if not child_ids:
-            return []
-        filters.append(Lesson.child_id.in_(child_ids))
-    elif current_user.role == RoleEnum.admin:
-        if tutor_id:
-            filters.append(Lesson.tutor_id == tutor_id)
-        if child_id:
-            filters.append(Lesson.child_id == child_id)
-    else:
-        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    filters = _role_filters(current_user, tutor_id, child_id)
+    if filters is None:
+        return []
 
     if date_from:
         filters.append(Lesson.date >= date_from)
@@ -191,6 +247,42 @@ async def get_lessons(
     return [_lesson_to_dict(l) for l in result.scalars().unique().all()]
 
 
+@router.get("/version")
+async def get_lessons_version(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    tutor_id: Optional[int] = Query(None),
+    child_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Короткий «отпечаток» расписания за период. Кабинет показывает
+    сохранённое расписание сразу, а полностью перезагружает его только если
+    отпечаток изменился (кто-то добавил/изменил/удалил занятие)."""
+    from sqlalchemy.dialects.postgresql import aggregate_order_by
+
+    filters = _role_filters(current_user, tutor_id, child_id)
+    if filters is None:
+        return {"v": "empty"}
+    if date_from:
+        filters.append(Lesson.date >= date_from)
+    if date_to:
+        filters.append(Lesson.date <= date_to)
+    row_text = func.concat_ws(
+        "|", Lesson.id, Lesson.status, Lesson.date, Lesson.time_start, Lesson.time_end,
+        Lesson.subject_id, Lesson.tutor_id, Lesson.child_id, func.coalesce(Lesson.notes, ""),
+        Lesson.is_free_trial, func.coalesce(Lesson.cancel_reason, ""),
+    )
+    stmt = select(
+        func.count(Lesson.id),
+        func.md5(func.coalesce(func.string_agg(row_text, aggregate_order_by(",", Lesson.id)), "")),
+    )
+    if filters:
+        stmt = stmt.where(and_(*filters))
+    count, digest = (await db.execute(stmt)).one()
+    return {"v": f"{count}-{digest}"}
+
+
 @router.post("/", response_model=dict, status_code=201)
 async def create_lesson(
     data: LessonCreate,
@@ -216,9 +308,19 @@ async def create_lesson(
     elif current_user.role != RoleEnum.admin:
         raise HTTPException(status_code=403, detail="Создавать занятия может только админ или репетитор")
 
-    lesson = Lesson(**data.model_dump())
+    payload = data.model_dump()
+    requested_status = payload.pop("status", None)
+    lesson = Lesson(**payload)
+    if requested_status:
+        lesson.status = requested_status
+        if requested_status == LessonStatus.trial:
+            lesson.is_free_trial = True
     db.add(lesson)
     await db.flush()
+
+    pending_report = None
+    if lesson.status == LessonStatus.completed:
+        pending_report = await _create_pending_report_if_needed(db, lesson, current_user, LIMIT_CREATE_MSG)
 
     student_name = _user_name(child.user)
     if current_user.role == RoleEnum.admin:
@@ -237,7 +339,10 @@ async def create_lesson(
 
     await db.commit()
     fresh = await _load_lesson(db, lesson.id)
-    return _lesson_to_dict(fresh)
+    out = _lesson_to_dict(fresh)
+    out["report_required"] = pending_report is not None
+    out["pending_report_id"] = pending_report.id if pending_report else None
+    return out
 
 
 @router.get("/tutor/my-students", response_model=list[dict])
@@ -358,12 +463,28 @@ async def update_lesson(
     if "subject_id" in updates and not await db.scalar(select(Subject.id).where(Subject.id == updates["subject_id"])):
         raise HTTPException(status_code=422, detail=f"Subject id={updates['subject_id']} not found")
 
-    if updates.get("status") == LessonStatus.completed and lesson.status != LessonStatus.completed:
-        await _require_report_for_fifth_lesson(db, lesson)
-
     old_status = lesson.status
+    becoming_completed = updates.get("status") == LessonStatus.completed and old_status != LessonStatus.completed
+    leaving_completed = (
+        "status" in updates and old_status == LessonStatus.completed and updates["status"] != LessonStatus.completed
+    )
+    if updates.get("status") == LessonStatus.trial:
+        updates.setdefault("is_free_trial", True)
     for field, value in updates.items():
         setattr(lesson, field, value)
+
+    pending_report = None
+    participants_changed = "tutor_id" in updates or "child_id" in updates
+    if becoming_completed:
+        pending_report = await _create_pending_report_if_needed(db, lesson, current_user, LIMIT_UPDATE_MSG)
+    elif leaving_completed:
+        await _drop_pending_reports(db, lesson.id)
+    elif participants_changed and lesson.status == LessonStatus.completed:
+        # Админ поменял репетитора/ученика у проведённого занятия — пересчитываем,
+        # чей это отчёт, чтобы незаполненный отчёт не висел на старом репетиторе.
+        await _drop_pending_reports(db, lesson.id)
+        await db.flush()
+        pending_report = await _create_pending_report_if_needed(db, lesson, current_user, LIMIT_UPDATE_MSG)
 
     target_title = "Занятие изменено"
     student_name = _user_name(lesson.child.user if lesson.child else None)
@@ -390,7 +511,10 @@ async def update_lesson(
 
     await db.commit()
     fresh = await _load_lesson(db, lesson_id)
-    return _lesson_to_dict(fresh)
+    out = _lesson_to_dict(fresh)
+    out["report_required"] = pending_report is not None
+    out["pending_report_id"] = pending_report.id if pending_report else None
+    return out
 
 
 @router.delete("/{lesson_id}", status_code=204)
@@ -421,7 +545,10 @@ async def delete_lesson(
 
     report_result = await db.execute(select(Report).where(Report.lesson_id == lesson.id))
     for report in report_result.scalars().all():
-        report.lesson_id = None
+        if report.status == "pending":
+            await db.delete(report)
+        else:
+            report.lesson_id = None
 
     await db.delete(lesson)
     await db.commit()

@@ -142,6 +142,13 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS homework_status VARCHAR(120)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS homework_comment TEXT",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS engagement_score INTEGER",
+                    # Проверка отчётов админом: старые отчёты остаются видимыми родителям
+                    "ALTER TABLE reports ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'approved'",
+                    "ALTER TABLE reports ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP",
+                    "CREATE INDEX IF NOT EXISTS ix_reports_tutor_status ON reports (tutor_id, status)",
+                    "CREATE INDEX IF NOT EXISTS ix_reports_lesson_id ON reports (lesson_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_child ON lessons (tutor_id, child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_notifications_user_id ON notifications (user_id, is_read)",
                     "UPDATE child_profiles SET crm_status = 'Пробное' WHERE crm_status LIKE 'Р%' OR crm_status IS NULL",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_id ON lessons (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_child_id ON lessons (child_id)",
@@ -191,8 +198,11 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_mime VARCHAR(150)",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_name VARCHAR(255)",
                 ):
+                    # Каждый оператор — в своей точке сохранения: если один упадёт,
+                    # остальные (и create_all) всё равно применятся, а не откатятся вместе.
                     try:
-                        await conn.execute(text(sql))
+                        async with conn.begin_nested():
+                            await conn.execute(text(sql))
                     except Exception:
                         logger.exception("Schema statement failed (continuing): %s", sql[:120])
 
@@ -206,14 +216,15 @@ async def _init_database_schema() -> None:
                     ("Химия", "himiya"),
                 ):
                     try:
-                        await conn.execute(
-                            text(
-                                "INSERT INTO subjects (name, slug, is_active) "
-                                "VALUES (:name, :slug, TRUE) "
-                                "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, is_active = TRUE"
-                            ),
-                            {"name": name, "slug": slug},
-                        )
+                        async with conn.begin_nested():
+                            await conn.execute(
+                                text(
+                                    "INSERT INTO subjects (name, slug, is_active) "
+                                    "VALUES (:name, :slug, TRUE) "
+                                    "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, is_active = TRUE"
+                                ),
+                                {"name": name, "slug": slug},
+                            )
                     except Exception:
                         logger.exception("Subject seed failed for %s", slug)
 

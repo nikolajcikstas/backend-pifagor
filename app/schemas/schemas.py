@@ -190,6 +190,8 @@ class LessonCreate(BaseModel):
     time_end: TimeType
     is_free_trial: bool = False
     notes: Optional[str] = None
+    # Статус можно указать сразу при добавлении (например, «Проведено»)
+    status: Optional[LessonStatus] = None
 
 
 class LessonUpdate(BaseModel):
@@ -259,9 +261,27 @@ class ReportOut(BaseModel):
     homework_status: Optional[str] = None
     homework_comment: Optional[str] = None
     engagement_score: Optional[int] = None
+    status: str = "approved"
+    approved_at: Optional[datetime] = None
+    student_name: Optional[str] = None
+    tutor_name: Optional[str] = None
+    subject_name: Optional[str] = None
+    lesson_date: Optional[DateType] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ReportUpdate(BaseModel):
+    content: Optional[str] = None
+    lesson_count: Optional[int] = None
+    material_score: Optional[int] = None
+    material_comment: Optional[str] = None
+    successes: Optional[str] = None
+    difficulties: Optional[str] = None
+    homework_status: Optional[str] = None
+    homework_comment: Optional[str] = None
+    engagement_score: Optional[int] = None
 
 
 # ─── Tutor documents (admin → tutor) ───────────────────────────────────────────

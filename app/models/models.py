@@ -221,11 +221,17 @@ class Report(Base):
     homework_status: Mapped[Optional[str]] = mapped_column(String(120))
     homework_comment: Mapped[Optional[str]] = mapped_column(Text)
     engagement_score: Mapped[Optional[int]] = mapped_column(Integer)
+    # pending — занятие требует отчёта, репетитор отложил заполнение;
+    # submitted — заполнен и ждёт проверки админом; approved — одобрен и виден родителю.
+    # Старые отчёты (до появления проверки) уже были видны родителям — для них 'approved'.
+    status: Mapped[str] = mapped_column(String(20), default="submitted", server_default="approved", nullable=False)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     tutor: Mapped["TutorProfile"] = relationship(back_populates="reports")
     child: Mapped["ChildProfile"] = relationship()
     subject: Mapped["Subject"] = relationship()
+    lesson: Mapped[Optional["Lesson"]] = relationship()
 
 
 class TutorDocument(Base):
