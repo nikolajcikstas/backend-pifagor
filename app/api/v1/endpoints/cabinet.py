@@ -88,6 +88,17 @@ async def create_report(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_tutor),
 ):
+    if current_user.role == RoleEnum.tutor:
+        teaches = await db.scalar(
+            select(func.count(Lesson.id)).where(
+                Lesson.tutor_id == current_user.tutor_profile.id,
+                Lesson.child_id == data.child_id,
+            )
+        )
+        if not teaches:
+            raise HTTPException(status_code=403, detail="Можно писать отчёты только по своим ученикам")
+    elif not current_user.tutor_profile:
+        raise HTTPException(status_code=400, detail="Отчёт может создать только репетитор")
     report = Report(**data.model_dump(), tutor_id=current_user.tutor_profile.id)
     db.add(report)
     child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(selectinload(ChildProfile.user)))
@@ -227,8 +238,12 @@ async def list_payments(
     q = select(Payment)
     if current_user.role == RoleEnum.parent and current_user.parent_profile:
         q = q.where(Payment.parent_id == current_user.parent_profile.id)
-    elif child_id:
-        q = q.where(Payment.child_id == child_id)
+    elif current_user.role == RoleEnum.admin:
+        if child_id:
+            q = q.where(Payment.child_id == child_id)
+    else:
+        # репетитор/ученик раньше получали платежи всех семей
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(q.order_by(Payment.created_at.desc()))
     return result.scalars().all()
 
@@ -370,8 +385,14 @@ async def submit_test_result(
     test_id: int,
     data: TestResultCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != RoleEnum.admin and not (
+        current_user.role == RoleEnum.child
+        and current_user.child_profile
+        and current_user.child_profile.id == data.child_id
+    ):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result_obj = TestResult(test_id=test_id, child_id=data.child_id, answers_json=data.answers_json)
     db.add(result_obj)
     await db.commit()
@@ -383,8 +404,17 @@ async def submit_test_result(
 async def get_test_results(
     test_id: int,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != RoleEnum.admin:
+        test = await db.scalar(select(Test).where(Test.id == test_id))
+        if not (
+            current_user.role == RoleEnum.tutor
+            and current_user.tutor_profile
+            and test is not None
+            and test.tutor_id == current_user.tutor_profile.id
+        ):
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(select(TestResult).where(TestResult.test_id == test_id))
     return result.scalars().all()
 
@@ -433,6 +463,8 @@ async def list_acts(
     q = select(Act)
     if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
         q = q.where(Act.tutor_id == current_user.tutor_profile.id)
+    elif current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(q.order_by(Act.created_at.desc()))
     return result.scalars().all()
 
@@ -527,6 +559,9 @@ async def list_parent_contracts(
     q = select(ParentContract)
     if current_user.role == RoleEnum.parent and current_user.parent_profile:
         q = q.where(ParentContract.parent_id == current_user.parent_profile.id)
+    elif current_user.role != RoleEnum.admin:
+        # раньше репетитор/ученик получали ВСЕ договоры родителей с личными данными
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(q)
     return result.scalars().all()
 
@@ -689,6 +724,8 @@ async def list_tutor_contracts(
     q = select(TutorContract)
     if current_user.role == RoleEnum.tutor and current_user.tutor_profile:
         q = q.where(TutorContract.tutor_id == current_user.tutor_profile.id)
+    elif current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
     result = await db.execute(q)
     return result.scalars().all()
 

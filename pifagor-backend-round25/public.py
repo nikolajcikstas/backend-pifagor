@@ -222,10 +222,31 @@ async def update_request_status(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
+    from app.models.models import RequestStatus
+
+    allowed = {s.value for s in RequestStatus}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail="Недопустимый статус заявки")
     result = await db.execute(select(LeadRequest).where(LeadRequest.id == request_id))
     req = result.scalar_one_or_none()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    req.status = status
+    req.status = RequestStatus(status)
     await db.commit()
     return {"ok": True}
+
+
+@router.delete("/requests/{request_id}", status_code=204)
+async def delete_lead_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Удаление заявки с сайта (например, тестовой) — только для админа."""
+    result = await db.execute(select(LeadRequest).where(LeadRequest.id == request_id))
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Заявка не найдена")
+    await db.delete(req)
+    await db.commit()
+    return Response(status_code=204)

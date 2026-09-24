@@ -592,44 +592,66 @@ async def update_admin_student(
 
 @router.get("/students-dashboard", dependencies=[Depends(require_admin)])
 async def students_dashboard(db: AsyncSession = Depends(get_db)):
+    # Раньше здесь подгружались ВСЕ занятия каждого ученика (joinedload даёт
+    # огромное декартово произведение строк), а наличие договора проверялось
+    # отдельным запросом на каждого ученика — при ~130 учениках это ~130 лишних
+    # обращений к базе и несколько секунд ожидания. Теперь всё собирается
+    # тремя запросами независимо от числа учеников; результат тот же.
+    from sqlalchemy.orm import selectinload
+
     result = await db.execute(
         select(ChildProfile)
         .options(
             joinedload(ChildProfile.user),
-            joinedload(ChildProfile.parents).joinedload(ParentChild.parent).joinedload(ParentProfile.user),
-            joinedload(ChildProfile.lessons).joinedload(Lesson.subject),
-            joinedload(ChildProfile.lessons).joinedload(Lesson.tutor).joinedload(TutorProfile.user),
-            joinedload(ChildProfile.lessons).joinedload(Lesson.tutor),
+            selectinload(ChildProfile.parents).joinedload(ParentChild.parent).joinedload(ParentProfile.user),
         )
     )
     children = result.scalars().unique().all()
+    child_ids = [c.id for c in children]
+
+    lesson_subjects_map: dict[int, set] = {}
+    lesson_tutors_map: dict[int, set] = {}
+    if child_ids:
+        TutorUser = User
+        lesson_rows = await db.execute(
+            select(Lesson.child_id, Subject.name, TutorUser.last_name, TutorUser.first_name)
+            .select_from(Lesson)
+            .outerjoin(Subject, Subject.id == Lesson.subject_id)
+            .outerjoin(TutorProfile, TutorProfile.id == Lesson.tutor_id)
+            .outerjoin(TutorUser, TutorUser.id == TutorProfile.user_id)
+            .where(Lesson.child_id.in_(child_ids))
+            .distinct()
+        )
+        for cid, subject_name, t_last, t_first in lesson_rows.all():
+            if subject_name:
+                lesson_subjects_map.setdefault(cid, set()).add(subject_name)
+            if t_last is not None or t_first is not None:
+                lesson_tutors_map.setdefault(cid, set()).add(f"{t_last} {t_first}".strip())
+
+    contract_rows = await db.execute(
+        select(ParentContract.child_id, ParentContractChild.child_id)
+        .select_from(ParentContract)
+        .outerjoin(ParentContractChild, ParentContractChild.contract_id == ParentContract.id)
+        .where(ParentContract.match_status == "matched")
+    )
+    children_with_contract: set[int] = set()
+    for primary_child_id, extra_child_id in contract_rows.all():
+        if primary_child_id is not None:
+            children_with_contract.add(primary_child_id)
+        if extra_child_id is not None:
+            children_with_contract.add(extra_child_id)
+
     rows = []
     for child in children:
         user = child.user
         if not user:
             continue
         parents = [link.parent.user for link in child.parents if link.parent and link.parent.user]
-        lesson_subjects = sorted({lesson.subject.name for lesson in child.lessons if lesson.subject})
-        lesson_tutors = sorted({
-            f"{lesson.tutor.user.last_name} {lesson.tutor.user.first_name}".strip()
-            for lesson in child.lessons
-            if lesson.tutor and lesson.tutor.user
-        })
+        lesson_subjects = sorted(lesson_subjects_map.get(child.id, set()))
+        lesson_tutors = sorted(lesson_tutors_map.get(child.id, set()))
         subjects = [s.strip() for s in (child.subjects_text or "").split(",") if s.strip()] or lesson_subjects
         tutors = [t.strip() for t in (child.tutors_text or "").split(",") if t.strip()] or lesson_tutors
-        contract_count_res = await db.execute(
-            select(func.count(func.distinct(ParentContract.id)))
-            .select_from(ParentContract)
-            .outerjoin(ParentContractChild, ParentContractChild.contract_id == ParentContract.id)
-            .where(
-                or_(
-                    ParentContract.child_id == child.id,
-                    ParentContractChild.child_id == child.id,
-                ),
-                ParentContract.match_status == "matched",
-            )
-        )
-        has_contract = (contract_count_res.scalar() or 0) > 0
+        has_contract = child.id in children_with_contract
         parent_names = [f"{p.last_name} {p.first_name}".strip() for p in parents]
         parent_phones = [p.phone for p in parents if p.phone]
         rows.append({
@@ -654,6 +676,9 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "parent_name": parent_names[0] if parent_names else "",
             "parent_phone": parent_phones[0] if parent_phones else "",
             "channel": child.channel or "",
+            "accounting_start_date": (
+                child.accounting_start_date.isoformat() if child.accounting_start_date else None
+            ),
         })
     return rows
 
