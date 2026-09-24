@@ -1724,3 +1724,36 @@ async def email_diagnostics(_: User = Depends(require_admin)):
         "error": test_error,
     }
 
+@router.get("/leads-diagnostics")
+async def leads_diagnostics(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Прямая проверка таблицы lead_requests через сырой SQL — чтобы понять,
+    реально ли заявки не сохраняются, или это где-то кэшируется ответ
+    на фронте/прокси. Показывает количество строк и последние 5 заявок
+    напрямую из базы, в обход ORM-связей."""
+    from sqlalchemy import text
+
+    count_result = await db.execute(text("SELECT COUNT(*) FROM lead_requests"))
+    total = count_result.scalar_one()
+
+    rows_result = await db.execute(
+        text(
+            "SELECT id, name, phone, email, subject_id, message, status, created_at "
+            "FROM lead_requests ORDER BY created_at DESC LIMIT 5"
+        )
+    )
+    rows = [dict(r._mapping) for r in rows_result.fetchall()]
+    for r in rows:
+        if r.get("created_at") is not None:
+            r["created_at"] = str(r["created_at"])
+
+    db_url = str(db.bind.engine.url) if hasattr(db, "bind") else None
+
+    return {
+        "total_rows_in_table": total,
+        "last_5_rows": rows,
+        "db_host": db.get_bind().engine.url.host if db.get_bind() else None,
+    }
+

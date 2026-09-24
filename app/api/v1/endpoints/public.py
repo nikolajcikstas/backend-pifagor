@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -182,6 +182,7 @@ async def create_lead_request(data: LeadRequestCreate, db: AsyncSession = Depend
 
 @router.get("/requests")
 async def list_lead_requests(
+    response: Response,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
@@ -190,6 +191,8 @@ async def list_lead_requests(
     не было вкладки в админке. Сохраняются в БД независимо от того, ушло
     ли уведомление на почту."""
     from sqlalchemy.orm import selectinload
+
+    response.headers["Cache-Control"] = "no-store"
 
     result = await db.execute(
         select(LeadRequest)
