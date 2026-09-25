@@ -226,6 +226,9 @@ class Report(Base):
     # Старые отчёты (до появления проверки) уже были видны родителям — для них 'approved'.
     status: Mapped[str] = mapped_column(String(20), default="submitted", server_default="approved", nullable=False)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Средняя оценка за ДЗ за период отчёта (10-балльная); если ДЗ не было — None
+    hw_avg_grade: Mapped[Optional[float]] = mapped_column(Float)
+    hw_count: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     tutor: Mapped["TutorProfile"] = relationship(back_populates="reports")
@@ -259,10 +262,32 @@ class Homework(Base):
     file_url: Mapped[Optional[str]] = mapped_column(String(500))           # tutor uploads
     submission_url: Mapped[Optional[str]] = mapped_column(String(500))     # child submits
     is_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Несколько файлов задания и ответа — JSON-список [{"url","name","mime"}]
+    task_files: Mapped[Optional[str]] = mapped_column(Text)
+    submission_files: Mapped[Optional[str]] = mapped_column(Text)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Оценка репетитора по 10-балльной шкале
+    grade: Mapped[Optional[int]] = mapped_column(Integer)
+    tutor_comment: Mapped[Optional[str]] = mapped_column(Text)
+    checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     lesson: Mapped["Lesson"] = relationship(back_populates="homeworks")
     child: Mapped["ChildProfile"] = relationship(back_populates="homeworks")
+
+
+class StoredFile(Base):
+    """Файлы кабинета (ДЗ, ответы учеников) хранятся в базе: диск сервера на
+    Render очищается при каждом перезапуске, и файлы из /uploads пропадали."""
+    __tablename__ = "stored_files"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime: Mapped[str] = mapped_column(String(150), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Material(Base):

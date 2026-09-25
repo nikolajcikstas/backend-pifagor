@@ -267,6 +267,8 @@ class ReportOut(BaseModel):
     tutor_name: Optional[str] = None
     subject_name: Optional[str] = None
     lesson_date: Optional[DateType] = None
+    hw_avg_grade: Optional[float] = None
+    hw_count: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -304,11 +306,18 @@ class TutorDocumentOut(BaseModel):
 
 # ─── Homework ─────────────────────────────────────────────────────────────────
 
+class HomeworkFile(BaseModel):
+    url: str
+    name: Optional[str] = None
+    mime: Optional[str] = None
+
+
 class HomeworkCreate(BaseModel):
     lesson_id: int
     child_id: int
     description: str
     file_url: Optional[str] = None
+    task_files: Optional[List[HomeworkFile]] = None
 
 
 class HomeworkOut(BaseModel):
@@ -320,6 +329,16 @@ class HomeworkOut(BaseModel):
     submission_url: Optional[str] = None
     is_done: bool
     created_at: datetime
+    task_files: List[HomeworkFile] = []
+    submission_files: List[HomeworkFile] = []
+    submitted_at: Optional[datetime] = None
+    grade: Optional[int] = None
+    tutor_comment: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    lesson_date: Optional[DateType] = None
+    subject_name: Optional[str] = None
+    tutor_name: Optional[str] = None
+    student_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

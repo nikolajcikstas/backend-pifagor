@@ -14,11 +14,11 @@ from app.models.models import (
     Report, Homework, Payment, Test, TestQuestion, TestAnswer,
     TestResult, Notification, Act, ParentContract, TutorContract,
     User, RoleEnum, Lesson, LessonStatus, TutorProfile, TutorDocument, ChildProfile,
-    TutorPayout, ParentChild, EmailReceipt, ParentProfile,
+    TutorPayout, ParentChild, EmailReceipt, ParentProfile, StoredFile,
 )
 from app.schemas.schemas import (
     ReportCreate, ReportOut, ReportUpdate,
-    HomeworkCreate, HomeworkOut,
+    HomeworkCreate, HomeworkOut, HomeworkFile,
     PaymentCreate, PaymentOut,
     TestCreate, TestOut, TestResultCreate, TestResultOut,
     NotificationOut,
@@ -92,6 +92,8 @@ def _report_to_dict(r: Report) -> dict:
         "tutor_name": _user_name(r.tutor.user if r.tutor else None) or None,
         "subject_name": r.subject.name if r.subject else None,
         "lesson_date": r.lesson.date if r.lesson else None,
+        "hw_avg_grade": r.hw_avg_grade,
+        "hw_count": r.hw_count,
         "created_at": r.created_at,
     }
 
@@ -99,8 +101,13 @@ def _report_to_dict(r: Report) -> dict:
 def _build_report_content(r) -> str:
     """Текст отчёта из заполненных полей формы — тем же форматом, что и раньше."""
     hw = f"Домашние задания: {r.homework_status or '-'}. {r.homework_comment or ''}".strip()
+    first = (
+        f"Усвоение материала на основе ДЗ: {r.hw_avg_grade:g}/10."
+        if getattr(r, "hw_avg_grade", None) is not None
+        else f"Усвоение материала: {r.material_score or '-'}/5."
+    )
     return "\n".join([
-        f"Усвоение материала: {r.material_score or '-'}/5.",
+        first,
         f"Что прошли: {r.material_comment or '-'}",
         f"Успехи: {r.successes or '-'}",
         f"Зона роста: {r.difficulties or '-'}",
@@ -109,12 +116,122 @@ def _build_report_content(r) -> str:
     ])
 
 
+async def _hw_average(
+    db: AsyncSession, tutor_id: int, child_id: int, lesson_id: Optional[int] = None, exclude_report_id: Optional[int] = None
+) -> tuple[Optional[float], int]:
+    """Средняя оценка за ДЗ этого репетитора у ученика за период отчёта:
+    после занятия предыдущего отчёта этой пары и до занятия текущего отчёта."""
+    upper = await db.scalar(select(Lesson.date).where(Lesson.id == lesson_id)) if lesson_id else None
+    prev_q = (
+        select(Lesson.date)
+        .join(Report, Report.lesson_id == Lesson.id)
+        .where(Report.tutor_id == tutor_id, Report.child_id == child_id)
+    )
+    if exclude_report_id:
+        prev_q = prev_q.where(Report.id != exclude_report_id)
+    if upper:
+        prev_q = prev_q.where(Lesson.date < upper)
+    lower = await db.scalar(prev_q.order_by(Lesson.date.desc()).limit(1))
+    q = (
+        select(func.avg(Homework.grade), func.count(Homework.id))
+        .join(Lesson, Lesson.id == Homework.lesson_id)
+        .where(Lesson.tutor_id == tutor_id, Homework.child_id == child_id, Homework.grade.isnot(None))
+    )
+    if lower:
+        q = q.where(Lesson.date > lower)
+    if upper:
+        q = q.where(Lesson.date <= upper)
+    avg, cnt = (await db.execute(q)).one()
+    return (round(float(avg), 1) if avg is not None else None), int(cnt or 0)
+
+
+async def _apply_hw_average(db: AsyncSession, report: Report) -> None:
+    avg, cnt = await _hw_average(db, report.tutor_id, report.child_id, report.lesson_id, report.id)
+    report.hw_avg_grade = avg
+    report.hw_count = cnt or None
+    lines = (report.content or "").split("\n")
+    if avg is not None:
+        report.material_score = None
+        if lines and lines[0].startswith("Усвоение материала"):
+            lines[0] = f"Усвоение материала на основе ДЗ: {avg:g}/10."
+            report.content = "\n".join(lines)
+    elif lines and lines[0].startswith("Усвоение материала на основе ДЗ"):
+        lines[0] = f"Усвоение материала: {report.material_score or '-'}/5."
+        report.content = "\n".join(lines)
+
+
 async def _load_report(db: AsyncSession, report_id: int) -> Report | None:
     res = await db.execute(_report_query().where(Report.id == report_id))
     return res.scalars().unique().one_or_none()
 
 
 # ─── Reports ──────────────────────────────────────────────────────────────────
+
+@router.get("/reports/hw-average")
+async def report_hw_average(
+    child_id: int = Query(...),
+    lesson_id: Optional[int] = Query(None),
+    report_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_tutor),
+):
+    """Для формы отчёта: средняя оценка за ДЗ за период (если ДЗ задавались)."""
+    tutor_id = None
+    if report_id:
+        rep_obj = await db.scalar(select(Report).where(Report.id == report_id))
+        if rep_obj:
+            tutor_id = rep_obj.tutor_id
+            lesson_id = lesson_id or rep_obj.lesson_id
+    if current_user.role == RoleEnum.tutor:
+        if tutor_id and tutor_id != current_user.tutor_profile.id:
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+        tutor_id = current_user.tutor_profile.id
+    if not tutor_id:
+        return {"avg": None, "count": 0}
+    avg, cnt = await _hw_average(db, tutor_id, child_id, lesson_id, report_id)
+    return {"avg": avg, "count": cnt}
+
+
+class BulkApproveBody(BaseModel):
+    ids: List[int]
+
+
+async def _approve(db: AsyncSession, report: Report) -> bool:
+    if report.status == "pending" or not (report.content or "").strip():
+        return False
+    if report.status == "approved":
+        return True
+    report.status = "approved"
+    report.approved_at = datetime.utcnow()
+    parents = await db.execute(
+        select(ParentProfile.user_id)
+        .join(ParentChild, ParentChild.parent_id == ParentProfile.id)
+        .where(ParentChild.child_id == report.child_id)
+    )
+    student = _user_name(report.child.user if report.child else None)
+    for parent_user_id in parents.scalars().all():
+        await _notify(db, parent_user_id, "Новый отчёт репетитора",
+                      f"Репетитор подготовил отчёт по ученику {student}. Его можно посмотреть в разделе «Отчёты».")
+    return True
+
+
+@router.post("/reports/approve-bulk")
+async def approve_reports_bulk(
+    body: BulkApproveBody,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Одобрить сразу несколько отчётов и отправить их родителям."""
+    ids = list(dict.fromkeys(body.ids))[:200]
+    if not ids:
+        return {"approved": [], "skipped": []}
+    res = await db.execute(_report_query().where(Report.id.in_(ids)))
+    approved, skipped = [], []
+    for report in res.scalars().unique().all():
+        (approved if await _approve(db, report) else skipped).append(report.id)
+    await db.commit()
+    return {"approved": approved, "skipped": skipped}
+
 
 @router.get("/reports", response_model=List[ReportOut])
 async def list_reports(
@@ -198,6 +315,8 @@ async def create_report(
     else:
         report = Report(**data.model_dump(), tutor_id=current_user.tutor_profile.id, status="submitted")
         db.add(report)
+        await db.flush()
+    await _apply_hw_average(db, report)
     child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(selectinload(ChildProfile.user)))
     await _notify_admins(
         db,
@@ -237,6 +356,10 @@ async def update_report(
         raise HTTPException(status_code=400, detail="Заполните основные поля отчёта: что прошли, успехи и зону роста")
     if not (report.content or "").strip():
         raise HTTPException(status_code=400, detail="Отчёт не может быть пустым")
+    # Средняя оценка за ДЗ пересчитывается при каждом сохранении отчёта,
+    # кроме уже отправленных родителям (их текст не меняем задним числом)
+    if report.status != "approved":
+        await _apply_hw_average(db, report)
     if not is_admin:
         was_pending = report.status == "pending"
         report.status = "submitted"
@@ -259,19 +382,8 @@ async def approve_report(
     report = await _load_report(db, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Отчёт не найден")
-    if report.status == "pending" or not (report.content or "").strip():
+    if not await _approve(db, report):
         raise HTTPException(status_code=400, detail="Отчёт ещё не заполнен репетитором")
-    report.status = "approved"
-    report.approved_at = datetime.utcnow()
-    parents = await db.execute(
-        select(ParentProfile.user_id)
-        .join(ParentChild, ParentChild.parent_id == ParentProfile.id)
-        .where(ParentChild.child_id == report.child_id)
-    )
-    student = _user_name(report.child.user if report.child else None)
-    for parent_user_id in parents.scalars().all():
-        await _notify(db, parent_user_id, "Новый отчёт репетитора",
-                      f"Репетитор подготовил отчёт по ученику {student}. Его можно посмотреть в разделе «Отчёты».")
     await db.commit()
     return _report_to_dict(await _load_report(db, report_id))
 
@@ -308,6 +420,87 @@ async def list_my_tutor_documents(
 
 # ─── Homeworks ────────────────────────────────────────────────────────────────
 
+def _json_files(raw) -> list:
+    import json
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    out = []
+    for f in data if isinstance(data, list) else []:
+        if isinstance(f, dict) and f.get("url"):
+            out.append({"url": str(f["url"])[:500], "name": (f.get("name") or "")[:255] or None, "mime": (f.get("mime") or "")[:150] or None})
+    return out
+
+
+async def _check_file_refs(db: AsyncSession, user: User, files: list, already: list) -> None:
+    """В ДЗ можно прикрепить только файлы, загруженные этим же пользователем
+    (или уже прикреплённые к этому ДЗ) — чужой файл по ссылке не «присвоить»."""
+    known = {f.get("url") for f in already}
+    ids = []
+    for f in files:
+        url = f["url"]
+        if url in known:
+            continue
+        if url.startswith("/uploads/") and ".." not in url:
+            continue  # старые файлы, загруженные до перехода на хранение в базе
+        if not url.startswith("/api/v1/files/"):
+            raise HTTPException(status_code=400, detail="Недопустимый файл")
+        ids.append(url[len("/api/v1/files/"):])
+    if not ids or user.role == RoleEnum.admin:
+        return
+    own = await db.scalar(
+        select(func.count(StoredFile.id)).where(StoredFile.id.in_(ids), StoredFile.owner_user_id == user.id)
+    )
+    if own != len(set(ids)):
+        raise HTTPException(status_code=400, detail="Недопустимый файл")
+
+
+def _homework_to_dict(hw: Homework) -> dict:
+    lesson = hw.lesson
+    task_files = _json_files(hw.task_files)
+    if not task_files and hw.file_url and hw.file_url.startswith("/"):
+        task_files = [{"url": hw.file_url, "name": None, "mime": None}]
+    submission_files = _json_files(hw.submission_files)
+    if not submission_files and hw.submission_url and hw.submission_url.startswith("/"):
+        submission_files = [{"url": hw.submission_url, "name": None, "mime": None}]
+    return {
+        "id": hw.id,
+        "lesson_id": hw.lesson_id,
+        "child_id": hw.child_id,
+        "description": hw.description,
+        "file_url": hw.file_url,
+        "submission_url": hw.submission_url,
+        "is_done": bool(hw.is_done),
+        "created_at": hw.created_at,
+        "task_files": task_files,
+        "submission_files": submission_files,
+        "submitted_at": hw.submitted_at,
+        "grade": hw.grade,
+        "tutor_comment": hw.tutor_comment,
+        "checked_at": hw.checked_at,
+        "lesson_date": lesson.date if lesson else None,
+        "subject_name": lesson.subject.name if lesson and lesson.subject else None,
+        "tutor_name": _user_name(lesson.tutor.user if lesson and lesson.tutor else None) or None,
+        "student_name": _user_name(hw.child.user if hw.child else None) or None,
+    }
+
+
+def _homework_query():
+    return select(Homework).options(
+        selectinload(Homework.lesson).selectinload(Lesson.subject),
+        selectinload(Homework.lesson).selectinload(Lesson.tutor).selectinload(TutorProfile.user),
+        selectinload(Homework.child).selectinload(ChildProfile.user),
+    )
+
+
+async def _load_homework(db: AsyncSession, hw_id: int) -> Homework | None:
+    res = await db.execute(_homework_query().where(Homework.id == hw_id))
+    return res.scalars().unique().one_or_none()
+
+
 @router.get("/homeworks", response_model=List[HomeworkOut])
 async def list_homeworks(
     child_id: Optional[int] = Query(None),
@@ -315,7 +508,7 @@ async def list_homeworks(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = select(Homework)
+    q = _homework_query()
     if current_user.role == RoleEnum.child and current_user.child_profile:
         q = q.where(Homework.child_id == current_user.child_profile.id)
     elif current_user.role == RoleEnum.parent and current_user.parent_profile:
@@ -335,8 +528,8 @@ async def list_homeworks(
         raise HTTPException(status_code=403, detail="Недостаточно прав")
     if lesson_id:
         q = q.where(Homework.lesson_id == lesson_id)
-    result = await db.execute(q)
-    return result.scalars().all()
+    result = await db.execute(q.order_by(Homework.created_at.desc(), Homework.id.desc()))
+    return [_homework_to_dict(h) for h in result.scalars().unique().all()]
 
 
 @router.post("/homeworks", response_model=HomeworkOut, status_code=201)
@@ -345,14 +538,24 @@ async def create_homework(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_tutor),
 ):
+    import json
     lesson = await db.scalar(
         select(Lesson)
         .where(Lesson.id == data.lesson_id)
         .options(selectinload(Lesson.child).selectinload(ChildProfile.user))
     )
-    if not lesson or lesson.tutor_id != current_user.tutor_profile.id or lesson.child_id != data.child_id:
+    if not lesson or lesson.child_id != data.child_id:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
-    hw = Homework(**data.model_dump())
+    if current_user.role == RoleEnum.tutor and lesson.tutor_id != current_user.tutor_profile.id:
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    payload = data.model_dump()
+    files = (payload.pop("task_files", None) or [])[:20]
+    if not files and payload.get("file_url"):
+        files = [{"url": payload["file_url"], "name": None, "mime": None}]
+    await _check_file_refs(db, current_user, files, [])
+    if files and not payload.get("file_url"):
+        payload["file_url"] = files[0]["url"]
+    hw = Homework(**payload, task_files=json.dumps(files, ensure_ascii=False) if files else None)
     db.add(hw)
     await _notify(
         db,
@@ -360,49 +563,92 @@ async def create_homework(
         "Новое домашнее задание",
         f"Репетитор {_user_name(current_user)} добавил ДЗ по занятию {lesson.date}.",
     )
-    await _notify_admins(
-        db,
-        "Домашнее задание добавлено",
-        f"Репетитор {_user_name(current_user)} добавил ДЗ ученику {_user_name(lesson.child.user if lesson.child else None)}.",
-    )
     await db.commit()
-    await db.refresh(hw)
-    return hw
+    return _homework_to_dict(await _load_homework(db, hw.id))
 
 
 class HomeworkSubmitBody(BaseModel):
     submission_url: Optional[str] = None
+    files: Optional[List[HomeworkFile]] = None
 
 
-@router.patch("/homeworks/{hw_id}/submit")
+@router.patch("/homeworks/{hw_id}/submit", response_model=HomeworkOut)
 async def submit_homework(
     hw_id: int,
     body: Optional[HomeworkSubmitBody] = Body(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Homework).where(Homework.id == hw_id))
-    hw = result.scalar_one_or_none()
+    """Ответ ученика: список файлов/фото. Можно добавлять новые и удалять
+    загруженные — пока репетитор не выставил оценку. Если файлов не осталось,
+    ДЗ снова считается невыполненным."""
+    import json
+    hw = await _load_homework(db, hw_id)
     if not hw:
-        raise HTTPException(status_code=404, detail="Homework not found")
+        raise HTTPException(status_code=404, detail="Домашнее задание не найдено")
     if current_user.role == RoleEnum.child and current_user.child_profile:
         if hw.child_id != current_user.child_profile.id:
             raise HTTPException(status_code=403, detail="Недостаточно прав")
     elif current_user.role != RoleEnum.admin:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
-    if body and body.submission_url:
-        hw.submission_url = body.submission_url
-    hw.is_done = True
-    lesson = await db.scalar(select(Lesson).where(Lesson.id == hw.lesson_id).options(selectinload(Lesson.tutor).selectinload(TutorProfile.user)))
-    await _notify(
-        db,
-        lesson.tutor.user_id if lesson and lesson.tutor else None,
-        "ДЗ выполнено",
-        f"Ученик {_user_name(current_user)} отправил домашнее задание.",
-    )
-    await _notify_admins(db, "ДЗ выполнено", f"Ученик {_user_name(current_user)} отправил домашнее задание.")
+    if hw.grade is not None and current_user.role != RoleEnum.admin:
+        raise HTTPException(status_code=400, detail="Задание уже проверено репетитором — изменить ответ нельзя")
+
+    was_done = bool(hw.is_done)
+    already = _json_files(hw.submission_files)
+    if not already and hw.submission_url and hw.submission_url != "done":
+        already = [{"url": hw.submission_url}]
+    if body and body.files is None and body.submission_url and body.submission_url.startswith(("/api/v1/files/", "/uploads/")):
+        # старые версии кабинета присылают один файл строкой — приводим к списку
+        body.files = [HomeworkFile(url=body.submission_url)]
+    if body and body.files is not None:
+        files = [f.model_dump() for f in body.files][:20]
+        await _check_file_refs(db, current_user, files, already)
+        hw.submission_files = json.dumps(files, ensure_ascii=False) if files else None
+        hw.submission_url = files[0]["url"] if files else None
+        hw.is_done = bool(files)
+    else:
+        # старый вариант «Отметить выполненным» (без файлов)
+        if body and body.submission_url and body.submission_url != "done":
+            hw.submission_url = body.submission_url[:500]
+        hw.is_done = True
+    hw.submitted_at = datetime.utcnow() if hw.is_done else None
+
+    if hw.is_done and not was_done:
+        tutor_user_id = hw.lesson.tutor.user_id if hw.lesson and hw.lesson.tutor else None
+        await _notify(db, tutor_user_id, "Ответ на домашнее задание",
+                      f"Ученик {_user_name(current_user)} прислал ответ на ДЗ от {hw.lesson.date if hw.lesson else ''}. Проверьте его во вкладке «Домашние задания».")
     await db.commit()
-    return {"ok": True}
+    return _homework_to_dict(await _load_homework(db, hw_id))
+
+
+class HomeworkGradeBody(BaseModel):
+    grade: int
+    comment: Optional[str] = None
+
+
+@router.patch("/homeworks/{hw_id}/grade", response_model=HomeworkOut)
+async def grade_homework(
+    hw_id: int,
+    body: HomeworkGradeBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_tutor),
+):
+    """Репетитор проверяет ДЗ и ставит оценку по 10-балльной шкале."""
+    if body.grade < 1 or body.grade > 10:
+        raise HTTPException(status_code=400, detail="Оценка должна быть от 1 до 10")
+    hw = await _load_homework(db, hw_id)
+    if not hw:
+        raise HTTPException(status_code=404, detail="Домашнее задание не найдено")
+    if current_user.role == RoleEnum.tutor and (not hw.lesson or hw.lesson.tutor_id != current_user.tutor_profile.id):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    hw.grade = body.grade
+    hw.tutor_comment = (body.comment or "").strip() or None
+    hw.checked_at = datetime.utcnow()
+    await _notify(db, hw.child.user_id if hw.child else None, "ДЗ проверено",
+                  f"Репетитор проверил домашнее задание от {hw.lesson.date if hw.lesson else ''}: оценка {body.grade}/10.")
+    await db.commit()
+    return _homework_to_dict(await _load_homework(db, hw_id))
 
 
 # ─── Payments ─────────────────────────────────────────────────────────────────
