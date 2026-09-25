@@ -388,6 +388,24 @@ async def approve_report(
     return _report_to_dict(await _load_report(db, report_id))
 
 
+@router.post("/reports/{report_id}/unapprove", response_model=ReportOut)
+async def unapprove_report(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Отменить отправку: отчёт пропадает у родителя и снова ждёт проверки
+    администратора — его можно исправить и отправить заново."""
+    report = await _load_report(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    if report.status == "approved":
+        report.status = "submitted"
+        report.approved_at = None
+        await db.commit()
+    return _report_to_dict(await _load_report(db, report_id))
+
+
 @router.delete("/reports/{report_id}", status_code=204)
 async def delete_report(
     report_id: int,

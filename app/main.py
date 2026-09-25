@@ -239,6 +239,29 @@ async def _init_database_schema() -> None:
                     except Exception:
                         logger.exception("Subject seed failed for %s", slug)
 
+                # Разовые правки данных: каждая выполняется ровно один раз
+                # (отметка о выполнении хранится в таблице app_data_migrations).
+                try:
+                    async with conn.begin_nested():
+                        await conn.execute(text(
+                            "CREATE TABLE IF NOT EXISTS app_data_migrations ("
+                            "name VARCHAR(100) PRIMARY KEY, applied_at TIMESTAMP DEFAULT now())"
+                        ))
+                        first_time = (await conn.execute(text(
+                            "INSERT INTO app_data_migrations (name) VALUES ('reports_back_to_review_2026_09') "
+                            "ON CONFLICT (name) DO NOTHING RETURNING name"
+                        ))).first()
+                        if first_time:
+                            # Все уже отправленные отчёты возвращаются на проверку администратору:
+                            # у родителей они скрываются до повторной отправки.
+                            res = await conn.execute(text(
+                                "UPDATE reports SET status = 'submitted', approved_at = NULL "
+                                "WHERE status = 'approved' AND COALESCE(TRIM(content), '') <> ''"
+                            ))
+                            logger.info("Reports returned to review: %s", res.rowcount)
+                except Exception:
+                    logger.exception("One-time data migration failed (continuing)")
+
         logger.info("Database schema initialization complete")
     except Exception:
         # Render free tier / cold DB can time out; keep the web process alive.
