@@ -160,6 +160,10 @@ async def _init_database_schema() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_homeworks_child_id ON homeworks (child_id)",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS hw_avg_grade DOUBLE PRECISION",
                     "ALTER TABLE reports ADD COLUMN IF NOT EXISTS hw_count INTEGER",
+                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS qm_trial_call_done BOOLEAN NOT NULL DEFAULT FALSE",
+                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS qm_refusal_reason TEXT",
+                    # не больше одной записи «New» на ученика
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_qm_calls_open ON qm_calls (child_id) WHERE status = 'new'",
                     "UPDATE child_profiles SET crm_status = 'Пробное' WHERE crm_status LIKE 'Р%' OR crm_status IS NULL",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_id ON lessons (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_child_id ON lessons (child_id)",
@@ -273,13 +277,16 @@ async def _init_database_schema() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _init_database_schema()
+    from app.api.v1.endpoints.quality import qm_scheduler_task
     task = asyncio.create_task(_daily_email_task())
+    qm_task = asyncio.create_task(qm_scheduler_task())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    for t in (task, qm_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

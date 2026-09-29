@@ -26,6 +26,7 @@ from app.models.models import (
     TutorProfile, TutorSubject, Subject, TutorDocument, TutorContract, Act,
     Homework, Report, Material, ParentContract, Payment, Comment, TestResult, Review,
     TutorPayout, EmailReceiptSplit, PayerChildLink, TutorRateHistory, ParentContractChild,
+    QmCall, QmRegularity,
 )
 from app.schemas.schemas import (
     InviteCodeCreate, InviteCodeResponse,
@@ -1524,6 +1525,8 @@ async def delete_admin_student(user_id: int, db: AsyncSession = Depends(get_db))
         (Payment, Payment.child_id),
         (Comment, Comment.child_id),
         (TestResult, TestResult.child_id),
+        (QmCall, QmCall.child_id),
+        (QmRegularity, QmRegularity.child_id),
     ):
         rows = await db.execute(select(model).where(field == child_id))
         for row in rows.scalars().all():
@@ -1653,8 +1656,10 @@ async def inactive_students_report(
 
     cutoff = date.today() - timedelta(days=days)
 
+    # Учитываются только действующие клиенты (CRM-статус «Клиент»)
     children_res = await db.execute(
         select(ChildProfile, User).join(User, ChildProfile.user_id == User.id)
+        .where(ChildProfile.crm_status == "Клиент", User.is_active.isnot(False))
     )
     children = children_res.all()
 

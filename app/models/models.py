@@ -129,6 +129,10 @@ class ChildProfile(Base):
     tutors_text: Mapped[Optional[str]] = mapped_column(Text)
     contract_label: Mapped[Optional[str]] = mapped_column(String(100))
     accounting_start_date: Mapped[Optional[date]] = mapped_column(Date)
+    # Контроль качества: звонок «2 недели после пробного» уже поставлен (или не нужен)
+    qm_trial_call_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # Контроль качества: причина отказа (вкладка «Отказы»)
+    qm_refusal_reason: Mapped[Optional[str]] = mapped_column(Text)
 
     user: Mapped["User"] = relationship(back_populates="child_profile")
     parents: Mapped[List["ParentChild"]] = relationship(back_populates="child")
@@ -654,3 +658,49 @@ class PayerChildLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Контроль качества (Quality system) ───────────────────────────────────────
+
+class QmCall(Base):
+    """Звонок менеджера по качеству родителю ученика.
+    status: new — нужно позвонить, done — звонок совершён (кейс закрыт).
+    reason: trial_2w — 2 недели после пробного, quality — контроль качества."""
+    __tablename__ = "qm_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    reason: Mapped[str] = mapped_column(String(30), nullable=False, default="quality")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="new", index=True)
+    feedback: Mapped[Optional[str]] = mapped_column(String(10))  # green | yellow | orange | red
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="auto")  # auto | manual
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    child: Mapped["ChildProfile"] = relationship()
+
+
+class QmRegularity(Base):
+    """Регулярность: клиент без занятий 7+ дней.
+    status: waiting — ожидает, in_work — в работе, closed — закрыт."""
+    __tablename__ = "qm_regularity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    last_lesson_date: Mapped[Optional[date]] = mapped_column(Date)
+    next_lesson_date: Mapped[Optional[date]] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="waiting")
+    overdue: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    child: Mapped["ChildProfile"] = relationship()
+
+
+class QmJob(Base):
+    """Когда последний раз выполнялось плановое обновление таблиц контроля качества."""
+    __tablename__ = "qm_jobs"
+
+    name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    last_run: Mapped[Optional[datetime]] = mapped_column(DateTime)
