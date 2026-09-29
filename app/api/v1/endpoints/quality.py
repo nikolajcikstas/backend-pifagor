@@ -155,7 +155,21 @@ async def refresh_calls(db: AsyncSession, initial: bool) -> int:
         )).all()
     }
     trial_border = today - timedelta(days=TRIAL_DAYS)
-    quality_border = _minus_months(now_utc, 2)
+    # Как часто звонить: занимается 2+ раза в неделю — раз в месяц, реже — раз в 2 месяца.
+    # Частота берётся из CRM («В неделю»); если там пусто — по проведённым занятиям за 4 недели.
+    recent = dict((await db.execute(
+        select(Lesson.child_id, func.count(Lesson.id))
+        .where(Lesson.status == LessonStatus.completed, Lesson.date > today - timedelta(days=28), Lesson.date <= today)
+        .group_by(Lesson.child_id)
+    )).all())
+
+    def call_every_months(child: ChildProfile) -> int:
+        per_week = child.lessons_per_week
+        if per_week is None:
+            per_week = (recent.get(child.id, 0) or 0) / 4
+        return 1 if per_week >= 1.5 else 2
+
+    borders = {1: _minus_months(now_utc, 1), 2: _minus_months(now_utc, 2)}
     added = 0
 
     def add(child_id: int, reason: str) -> None:
@@ -186,11 +200,11 @@ async def refresh_calls(db: AsyncSession, initial: bool) -> int:
             if child.id not in open_ids:
                 add(child.id, "trial_2w")
             continue
-        # Контроль качества: клиенты, которым звонили 2+ месяца назад
+        # Контроль качества: клиенты, которым звонили месяц (2+ занятия в неделю) или 2 месяца назад
         if child.id in open_ids:
             continue
         done_at = last_done.get(child.id)
-        if (done_at is not None and done_at <= quality_border) or (done_at is None and child.qm_trial_call_done):
+        if (done_at is not None and done_at <= borders[call_every_months(child)]) or (done_at is None and child.qm_trial_call_done):
             add(child.id, "quality")
     return added
 
