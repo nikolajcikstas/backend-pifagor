@@ -187,7 +187,8 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
         db.add(parent_invite)
 
         first_name, last_name = _split_name(description)
-        placeholder_password = get_password_hash(secrets.token_urlsafe(24))
+        from app.core.security import ahash_password
+        placeholder_password = await ahash_password(secrets.token_urlsafe(24))
 
         child_user = User(
             email=f"placeholder-child-{child_code.lower()}@pifagor.local",

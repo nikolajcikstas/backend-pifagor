@@ -170,7 +170,9 @@ async def create_lead_request(data: LeadRequestCreate, db: AsyncSession = Depend
         if subject:
             subject_name = subject.name
 
-    send_lead_notification(
+    import asyncio as _asyncio
+    await _asyncio.to_thread(
+        send_lead_notification,
         name=data.name,
         phone=data.phone,
         subject_name=subject_name,

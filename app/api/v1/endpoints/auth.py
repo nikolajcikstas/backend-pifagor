@@ -8,6 +8,8 @@ from app.core.security import (
     decode_token,
     get_password_hash,
     verify_password,
+    averify_password,
+    ahash_password,
 )
 from app.db.session import get_db
 from app.models.models import (
@@ -28,7 +30,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(data.password, user.hashed_password):
+    if not user or not await averify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Аккаунт отключён")
@@ -134,7 +136,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
 
     if target_user:
         target_user.email = data.email
-        target_user.hashed_password = get_password_hash(data.password)
+        target_user.hashed_password = await ahash_password(data.password)
         target_user.first_name = data.first_name
         target_user.last_name = data.last_name
         target_user.middle_name = data.middle_name or ""
@@ -145,7 +147,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     else:
         new_user = User(
             email=data.email,
-            hashed_password=get_password_hash(data.password),
+            hashed_password=await ahash_password(data.password),
             first_name=data.first_name,
             last_name=data.last_name,
             middle_name=data.middle_name or "",

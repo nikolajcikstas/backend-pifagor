@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -13,6 +14,16 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+async def averify_password(plain: str, hashed: str) -> bool:
+    """Проверка пароля в отдельном потоке: bcrypt медленный (сотни мс, а на
+    слабом сервере — секунды) и иначе на это время «замораживает» весь сервер."""
+    return await asyncio.to_thread(verify_password, plain, hashed)
+
+
+async def ahash_password(password: str) -> str:
+    return await asyncio.to_thread(get_password_hash, password)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

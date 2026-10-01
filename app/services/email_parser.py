@@ -172,13 +172,11 @@ def _fetch_raw_receipts() -> List[Dict]:
         logger.warning("Email credentials not configured — skipping inbox check.")
         return []
 
-    old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(IMAP_TIMEOUT)
 
     parsed: List[Dict] = []
     mail = None
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
         mail.login(EMAIL_USER, EMAIL_PASSWORD)
         mail.select("INBOX")
 
@@ -223,7 +221,6 @@ def _fetch_raw_receipts() -> List[Dict]:
                 mail.logout()
             except Exception:
                 pass
-        socket.setdefaulttimeout(old_timeout)
 
     return parsed
 
@@ -334,7 +331,9 @@ async def rematch_unlinked_receipts(db: AsyncSession) -> int:
 async def run_email_parse(db: AsyncSession) -> int:
     from app.models.models import EmailReceipt
 
-    raw_receipts = _fetch_raw_receipts()
+    import asyncio as _asyncio
+    # IMAP — синхронная библиотека: в отдельном потоке, чтобы не «замораживать» сервер
+    raw_receipts = await _asyncio.to_thread(_fetch_raw_receipts)
     if not raw_receipts:
         return await rematch_unlinked_receipts(db)
 

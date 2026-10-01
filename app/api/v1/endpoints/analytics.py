@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 CLIENT = "Клиент"
 LEFT_STATUSES = ("Отказ", "Не занимаются")
 PROXY_DAYS = 28
+# С этой даты «пришёл» = добавлен в CRM (дата создания карточки ученика).
+# Раньше — дата первого проведённого занятия (данные переносились в систему).
+ARRIVAL_BY_CRM_FROM = date(2026, 10, 1)
 MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 MONTHS_FULL = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -130,7 +133,9 @@ def _held(today: date):
 
 
 def _is_trial():
-    return or_(Lesson.is_free_trial.is_(True), Lesson.status == LessonStatus.trial)
+    """Пробное — только занятие со статусом «Пробное». Занятие со статусом
+    «Проведено» считается проведённым, даже если было отмечено как пробное."""
+    return Lesson.status == LessonStatus.trial
 
 
 def _hours_expr():
@@ -386,13 +391,17 @@ async def overview(
         .where(CrmStatusEvent.new_status.in_(LEFT_STATUSES)).group_by(CrmStatusEvent.child_id)
     )).all())
     children = (await db.execute(
-        select(ChildProfile.id, ChildProfile.crm_status, User.is_active).join(User, User.id == ChildProfile.user_id)
+        select(ChildProfile.id, ChildProfile.crm_status, User.is_active, User.created_at).join(User, User.id == ChildProfile.user_id)
     )).all()
     came = [0] * len(db_b)
     left = [0] * len(db_b)
     came_ids, converted = [], 0
-    for cid, status, is_active in children:
-        f = first_lesson.get(cid)
+    for cid, status, is_active, created_at in children:
+        added = (created_at + timedelta(hours=3)).date() if created_at else None
+        if added is not None and added >= ARRIVAL_BY_CRM_FROM:
+            f = added  # добавлен в CRM с октября 2026 — считаем по дате добавления
+        else:
+            f = first_lesson.get(cid)  # старые ученики — по первому занятию
         if f and start <= f <= end:
             i = dpos(f)
             if i is not None:
@@ -416,7 +425,38 @@ async def overview(
         "base_active": base_active,
         "churn_pct": round(100 * total_left / base_active, 1) if base_active else None,
         "conversion_pct": round(100 * converted / total_came, 1) if total_came else None,
+        "crm_from": ARRIVAL_BY_CRM_FROM.isoformat(),
     }
+
+    # занятия не по 60 минут (кроме отменённых) — чтобы находить ошибки во времени
+    dur_min = func.round(func.extract("epoch", Lesson.time_end - Lesson.time_start) / 60)
+    odd_rows = (await db.execute(
+        select(Lesson.child_id, Lesson.tutor_id, Lesson.date, Lesson.time_start, Lesson.time_end, Lesson.status, dur_min)
+        .where(Lesson.date >= start, Lesson.date <= end, Lesson.status != LessonStatus.cancelled, dur_min != 60)
+        .order_by(Lesson.date.desc())
+    )).all()
+    odd = {}
+    if odd_rows:
+        names = {cid: f"{ln or ''} {fn or ''}".strip() for cid, ln, fn in (await db.execute(
+            select(ChildProfile.id, User.last_name, User.first_name).join(User, User.id == ChildProfile.user_id)
+            .where(ChildProfile.id.in_({r[0] for r in odd_rows}))
+        )).all()}
+        tnames = {tid: f"{ln or ''} {fn or ''}".strip() for tid, ln, fn in (await db.execute(
+            select(TutorProfile.id, User.last_name, User.first_name).join(User, User.id == TutorProfile.user_id)
+        )).all()}
+        for cid, tid, d, ts, te, st, m in odd_rows:
+            x = odd.setdefault(cid, {"child_id": cid, "name": names.get(cid, ""), "tutors": [], "count": 0, "durations": {}, "lessons": []})
+            x["count"] += 1
+            mm = int(m or 0)
+            x["durations"][mm] = x["durations"].get(mm, 0) + 1
+            tn = tnames.get(tid)
+            if tn and tn not in x["tutors"]:
+                x["tutors"].append(tn)
+            if len(x["lessons"]) < 5:
+                x["lessons"].append({"date": d.isoformat(), "time": f"{ts.strftime('%H:%M')}–{te.strftime('%H:%M')}", "minutes": mm})
+    odd_list = sorted(odd.values(), key=lambda x: (-x["count"], x["name"]))
+    for x in odd_list:
+        x["durations"] = [{"minutes": k, "count": v} for k, v in sorted(x["durations"].items())]
 
     # итоги и сравнение с прошлым периодом
     rate = await _rates(db)
@@ -441,6 +481,7 @@ async def overview(
         "freq": {"series": freq_series, "plan_k": round(float(plan), 2) if plan is not None else None,
                  "first_snapshot": first_snapshot.isoformat() if first_snapshot else None},
         "dynamics": dynamics,
+        "odd_durations": odd_list,
     }
 
 

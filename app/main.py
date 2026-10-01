@@ -83,6 +83,9 @@ async def _daily_email_task():
     from app.services.email_parser import run_email_parse
     from app.db.session import async_session_maker
 
+    # Первую проверку почты делаем не сразу после запуска: сервер на Render
+    # «просыпается» именно когда человек входит в кабинет — сначала вход.
+    await asyncio.sleep(180)
     while True:
         try:
             async with async_session_maker() as db:
@@ -115,9 +118,52 @@ async def _weekly_contract_recalc_task():
             logger.error("Weekly contract recalculation failed: %s", e)
 
 
-async def _init_database_schema() -> None:
-    """Best-effort schema bootstrap. Never crash the process on transient DB issues."""
+def _schema_fingerprint() -> str:
+    """Отпечаток схемы: код настройки базы + все таблицы и колонки моделей.
+    Пока он не меняется, при каждом «пробуждении» сервера проверять и
+    дополнять базу не нужно — сервер стартует за секунды, а не за минуту."""
+    import hashlib
+    import inspect as _inspect
+    h = hashlib.sha1()
+    try:
+        h.update(_inspect.getsource(_init_database_schema).encode("utf-8"))
+    except Exception:
+        h.update(b"no-source")
+    for t in sorted(Base.metadata.tables.values(), key=lambda t: t.name):
+        h.update(t.name.encode("utf-8"))
+        for c in t.columns:
+            h.update(f"{c.name}:{c.type}".encode("utf-8"))
+    return "schema:" + h.hexdigest()[:20]
+
+
+async def _schema_is_current(marker: str) -> bool:
+    try:
+        async with asyncio.timeout(20):
+            async with engine.connect() as conn:
+                res = await conn.execute(text("SELECT 1 FROM app_data_migrations WHERE name = :n"), {"n": marker})
+                return res.first() is not None
+    except Exception:
+        return False  # таблицы ещё нет или база недоступна — делаем полную настройку
+
+
+async def _prepare_database() -> None:
+    marker = _schema_fingerprint()
+    if await _schema_is_current(marker):
+        logger.info("Database schema is up to date (%s) — skipping initialization", marker)
+        return
+    if await _init_database_schema():
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("INSERT INTO app_data_migrations (name) VALUES (:n) ON CONFLICT (name) DO NOTHING"), {"n": marker})
+        except Exception:
+            logger.exception("Could not store schema marker")
+
+
+async def _init_database_schema() -> bool:
+    """Best-effort schema bootstrap. Never crash the process on transient DB issues.
+    Возвращает True, если всё применилось без ошибок."""
     logger.info("Starting database schema initialization")
+    failures = 0
     try:
         async with asyncio.timeout(120):
             async with engine.begin() as conn:
@@ -221,6 +267,7 @@ async def _init_database_schema() -> None:
                         async with conn.begin_nested():
                             await conn.execute(text(sql))
                     except Exception:
+                        failures += 1
                         logger.exception("Schema statement failed (continuing): %s", sql[:120])
 
                 for name, slug in (
@@ -243,6 +290,7 @@ async def _init_database_schema() -> None:
                                 {"name": name, "slug": slug},
                             )
                     except Exception:
+                        failures += 1
                         logger.exception("Subject seed failed for %s", slug)
 
                 # Разовые правки данных: каждая выполняется ровно один раз
@@ -266,19 +314,22 @@ async def _init_database_schema() -> None:
                             ))
                             logger.info("Reports returned to review: %s", res.rowcount)
                 except Exception:
+                    failures += 1
                     logger.exception("One-time data migration failed (continuing)")
 
-        logger.info("Database schema initialization complete")
+        logger.info("Database schema initialization complete (failures: %s)", failures)
+        return failures == 0
     except Exception:
         # Render free tier / cold DB can time out; keep the web process alive.
         logger.exception(
             "Database schema initialization failed; service will keep running and retry via requests"
         )
+        return False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _init_database_schema()
+    await _prepare_database()
     from app.api.v1.endpoints.quality import qm_scheduler_task
     task = asyncio.create_task(_daily_email_task())
     qm_task = asyncio.create_task(qm_scheduler_task())

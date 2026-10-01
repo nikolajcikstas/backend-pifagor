@@ -26,7 +26,7 @@ from app.schemas.schemas import (
     TutorDocumentOut,
 )
 from app.core.deps import get_current_user, require_admin, require_tutor
-from app.core.security import get_password_hash, verify_password as _verify_password
+from app.core.security import get_password_hash, verify_password as _verify_password, averify_password, ahash_password
 from app.services.tutor_earnings import compute_tutor_earnings
 
 router = APIRouter(tags=["cabinet"])
@@ -1089,11 +1089,11 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if not _verify_password(body.current_password, current_user.hashed_password):
+    if not await averify_password(body.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Неверный текущий пароль")
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="Пароль минимум 6 символов")
-    current_user.hashed_password = get_password_hash(body.new_password)
+    current_user.hashed_password = await ahash_password(body.new_password)
     await db.commit()
     return {"ok": True}
 
@@ -1150,7 +1150,8 @@ async def forgot_password_request(
             "expires_at": datetime.utcnow() + timedelta(minutes=15),
             "attempts": 0,
         }
-        send_password_reset_code(user.email, code)
+        import asyncio as _asyncio
+        await _asyncio.to_thread(send_password_reset_code, user.email, code)
 
     return {"ok": True, "message": "Если данные верны, код отправлен на почту, привязанную к аккаунту."}
 
@@ -1181,7 +1182,7 @@ async def forgot_password_confirm(
     if body.code.strip() != entry["code"]:
         raise HTTPException(status_code=400, detail="Неверный код")
 
-    user.hashed_password = get_password_hash(body.new_password)
+    user.hashed_password = await ahash_password(body.new_password)
     await db.commit()
     _reset_codes.pop(user.id, None)
     return {"ok": True}
