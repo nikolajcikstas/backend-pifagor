@@ -219,7 +219,8 @@ async def get_lessons(
     if search:
         # Поиск по ученику/репетитору/предмету/статусу/примечаниям — фильтруется
         # в базе (по индексам), а не выгрузкой всех занятий на фронт.
-        pattern = f"%{search}%"
+        # Запрос разбивается на слова: «Федоренко Андрей» и «Андрей Федоренко»
+        # находят одно и то же — каждое слово должно встретиться в любом из полей.
         TutorUser = aliased(User)
         ChildUser = aliased(User)
         stmt = (
@@ -228,17 +229,20 @@ async def get_lessons(
             .join(ChildProfile, Lesson.child_id == ChildProfile.id, isouter=True)
             .join(ChildUser, ChildProfile.user_id == ChildUser.id, isouter=True)
             .join(Subject, Lesson.subject_id == Subject.id, isouter=True)
-            .where(
+        )
+        for word in search.split()[:6]:
+            esc = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{esc}%"
+            stmt = stmt.where(
                 or_(
-                    TutorUser.first_name.ilike(pattern),
-                    TutorUser.last_name.ilike(pattern),
-                    ChildUser.first_name.ilike(pattern),
-                    ChildUser.last_name.ilike(pattern),
-                    Subject.name.ilike(pattern),
-                    Lesson.notes.ilike(pattern),
+                    TutorUser.first_name.ilike(pattern, escape="\\"),
+                    TutorUser.last_name.ilike(pattern, escape="\\"),
+                    ChildUser.first_name.ilike(pattern, escape="\\"),
+                    ChildUser.last_name.ilike(pattern, escape="\\"),
+                    Subject.name.ilike(pattern, escape="\\"),
+                    Lesson.notes.ilike(pattern, escape="\\"),
                 )
             )
-        )
 
     if filters:
         stmt = stmt.where(and_(*filters))
