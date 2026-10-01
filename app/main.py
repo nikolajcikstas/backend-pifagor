@@ -164,6 +164,8 @@ async def _init_database_schema() -> None:
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS qm_refusal_reason TEXT",
                     # не больше одной записи «New» на ученика
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_qm_calls_open ON qm_calls (child_id) WHERE status = 'new'",
+                    "CREATE INDEX IF NOT EXISTS ix_qm_calls_status_closed ON qm_calls (status, closed_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS ix_lessons_date_status ON lessons (date, status)",
                     "UPDATE child_profiles SET crm_status = 'Пробное' WHERE crm_status LIKE 'Р%' OR crm_status IS NULL",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_id ON lessons (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_child_id ON lessons (child_id)",

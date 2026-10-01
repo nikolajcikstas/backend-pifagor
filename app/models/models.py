@@ -704,3 +704,25 @@ class QmJob(Base):
 
     name: Mapped[str] = mapped_column(String(50), primary_key=True)
     last_run: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+
+# ─── Аналитика ────────────────────────────────────────────────────────────────
+
+class AnalyticsDaily(Base):
+    """Снимок на каждый день: сколько клиентов было в CRM."""
+    __tablename__ = "analytics_daily"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    active_clients: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CrmStatusEvent(Base):
+    """История смены CRM-статуса ученика (чтобы знать дату отказа/перехода в клиенты)."""
+    __tablename__ = "crm_status_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    old_status: Mapped[Optional[str]] = mapped_column(String(50))
+    new_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)

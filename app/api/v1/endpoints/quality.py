@@ -132,13 +132,32 @@ async def _anchor_dates(db: AsyncSession, child_ids: Optional[list[int]] = None)
     return anchors
 
 
+def _held_filter(today: date):
+    """Проведённое занятие: статус «Проведено» или прошедшее «Пробное»."""
+    return and_(
+        Lesson.date <= today,
+        or_(Lesson.status == LessonStatus.completed, Lesson.status == LessonStatus.trial),
+    )
+
+
 async def _last_completed(db: AsyncSession) -> dict[int, date]:
+    """Дата последнего проведённого занятия (статус «Проведено»; пробные не в счёт)."""
     res = await db.execute(
         select(Lesson.child_id, func.max(Lesson.date))
         .where(Lesson.status == LessonStatus.completed)
         .group_by(Lesson.child_id)
     )
     return {cid: d for cid, d in res.all()}
+
+
+async def _with_future_lessons(db: AsyncSession) -> set[int]:
+    today = _now_minsk().date()
+    res = await db.execute(
+        select(Lesson.child_id).where(
+            Lesson.date >= today, Lesson.status.in_([LessonStatus.scheduled, LessonStatus.trial])
+        ).distinct()
+    )
+    return set(res.scalars().all())
 
 
 async def refresh_calls(db: AsyncSession, initial: bool) -> int:
@@ -210,7 +229,9 @@ async def refresh_calls(db: AsyncSession, initial: bool) -> int:
 
 
 async def refresh_regularity(db: AsyncSession) -> int:
-    """Свежая выгрузка: клиенты без проведённых занятий 7+ дней."""
+    """Свежая выгрузка (вт и сб 8:00): клиенты без проведённых занятий 7+ дней.
+    Строки, которые менеджер уже ведёт (в т.ч. закрытые), остаются, пока система
+    не увидит проведённое занятие."""
     today = _now_minsk().date()
     border = today - timedelta(days=INACTIVE_DAYS)
     children = await _children(db)
@@ -223,23 +244,17 @@ async def refresh_regularity(db: AsyncSession) -> int:
     for child in children:
         cid = child.id
         last_date = last.get(cid)
-        rows_c = by_child.get(cid, [])
-        still_open = False
-        for r in rows_c:
-            if r.status == "closed":
-                continue
-            if child.crm_status != CLIENT:
-                await db.delete(r)  # больше не клиент — из «Регулярности» убираем
-            elif last_date is not None and (r.last_lesson_date is None or last_date > r.last_lesson_date):
-                await db.delete(r)  # ученик снова занимался — запись больше не нужна
+        is_client = child.crm_status == CLIENT and _eligible(child)
+        keep = False
+        for r in by_child.get(cid, []):
+            resumed = last_date is not None and (r.last_lesson_date is None or last_date > r.last_lesson_date)
+            if not is_client or resumed:
+                await db.delete(r)  # больше не клиент или снова занимается — запись не нужна
             else:
-                still_open = True
-        if still_open or child.crm_status != CLIENT or not _eligible(child):
+                keep = True
+        if keep or not is_client:
             continue
         if last_date is not None and last_date > border:
-            continue
-        # закрытую запись не открываем снова, пока после закрытия не было нового занятия
-        if any((r.last_lesson_date or date.min) >= (last_date or date.min) for r in rows_c if r.status == "closed"):
             continue
         db.add(QmRegularity(child_id=cid, last_lesson_date=last_date, status="waiting", created_at=datetime.utcnow()))
         added += 1
@@ -247,23 +262,27 @@ async def refresh_regularity(db: AsyncSession) -> int:
 
 
 async def nightly_regularity(db: AsyncSession) -> None:
-    """После полуночи: проведено ли занятие к назначенной дате."""
+    """Каждую ночь: занятие проведено — запись удаляется (даже закрытая);
+    назначенная дата прошла, а занятия не было — строка красная и снова «В работе»."""
     today = _now_minsk().date()
     last = await _last_completed(db)
-    rows = (await db.execute(select(QmRegularity).where(QmRegularity.status != "closed"))).scalars().all()
+    rows = (await db.execute(select(QmRegularity))).scalars().all()
     for r in rows:
         last_date = last.get(r.child_id)
-        resumed = last_date is not None and last_date <= today and (r.last_lesson_date is None or last_date > r.last_lesson_date)
+        resumed = last_date is not None and (r.last_lesson_date is None or last_date > r.last_lesson_date)
         if resumed:
-            await db.delete(r)  # занятие проведено — запись закрывается сама
-        else:
-            r.overdue = bool(r.next_lesson_date and r.next_lesson_date < today)
+            await db.delete(r)
+            continue
+        r.overdue = bool(r.next_lesson_date and r.next_lesson_date < today)
+        if r.overdue and r.status == "closed":
+            r.status, r.closed_at = "in_work", None
 
 
 JOBS = {
     "calls_refresh": _last_refresh_slot,
     "regularity_refresh": _last_refresh_slot,
     "regularity_nightly": _last_nightly_slot,
+    "analytics_snapshot": _last_nightly_slot,  # число клиентов на день — для аналитики
 }
 
 
@@ -287,6 +306,9 @@ async def run_due_jobs(db: AsyncSession, force: bool = False) -> None:
                 elif name == "regularity_refresh":
                     added = await refresh_regularity(db)
                     logger.info("QM regularity refresh: %s new", added)
+                elif name == "analytics_snapshot":
+                    from app.api.v1.endpoints.analytics import save_today_snapshot
+                    await save_today_snapshot(db)
                 else:
                     await nightly_regularity(db)
                 if not job:
@@ -401,23 +423,120 @@ async def _one_call(db: AsyncSession, call_id: int) -> dict:
 
 # ─── API: звонки ──────────────────────────────────────────────────────────────
 
+def _search_filter(q: str):
+    """Поиск по имени/фамилии ученика, ФИО и телефону родителя."""
+    esc = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{esc}%"
+    child_user = select(User.id).where(
+        User.id == ChildProfile.user_id,
+        or_(User.first_name.ilike(like, escape="\\"), User.last_name.ilike(like, escape="\\"),
+            func.concat(User.last_name, " ", User.first_name).ilike(like, escape="\\"),
+            func.concat(User.first_name, " ", User.last_name).ilike(like, escape="\\")),
+    )
+    parent = (
+        select(ParentChild.id)
+        .join(ParentProfile, ParentProfile.id == ParentChild.parent_id)
+        .join(User, User.id == ParentProfile.user_id)
+        .where(ParentChild.child_id == QmCall.child_id,
+               or_(User.first_name.ilike(like, escape="\\"), User.last_name.ilike(like, escape="\\"), User.phone.ilike(like, escape="\\")))
+    )
+    return or_(
+        QmCall.child_id.in_(select(ChildProfile.id).where(child_user.exists())),
+        parent.exists(),
+        QmCall.comment.ilike(like, escape="\\"),
+    )
+
+
+async def _history_info(db: AsyncSession, child_ids: list[int]) -> dict[int, list[QmCall]]:
+    """Совершённые звонки по ученикам — для номера звонка и «прошлого звонка»."""
+    if not child_ids:
+        return {}
+    res = await db.execute(
+        select(QmCall).where(QmCall.child_id.in_(child_ids), QmCall.status == "done")
+        .order_by(QmCall.child_id, func.coalesce(QmCall.closed_at, QmCall.created_at).asc(), QmCall.id.asc())
+    )
+    out: dict[int, list[QmCall]] = {}
+    for c in res.scalars().all():
+        out.setdefault(c.child_id, []).append(c)
+    return out
+
+
+def _brief(c: QmCall) -> dict:
+    return {"feedback": c.feedback, "comment": c.comment or "", "closed_at": c.closed_at.isoformat() if c.closed_at else None,
+            "reason_label": REASONS.get(c.reason, c.reason)}
+
+
 @router.get("/calls", dependencies=[Depends(require_admin)])
-async def list_calls(view: str = Query("new"), db: AsyncSession = Depends(get_db)):
+async def list_calls(
+    view: str = Query("new"),
+    q: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
     await run_due_jobs(db)
     status = "done" if view == "all" else "new"
-    q = select(QmCall).where(QmCall.status == status).options(joinedload(QmCall.child).joinedload(ChildProfile.user))
-    q = q.order_by(QmCall.closed_at.desc(), QmCall.id.desc()) if status == "done" else q.order_by(QmCall.created_at.asc(), QmCall.id.asc())
-    calls = (await db.execute(q)).scalars().unique().all()
+    base = select(QmCall).where(QmCall.status == status)
+    if q.strip():
+        base = base.where(_search_filter(q))
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    query = base.options(joinedload(QmCall.child).joinedload(ChildProfile.user))
+    if status == "done":
+        # «All» может разрастись до тысяч записей — отдаём страницами
+        query = query.order_by(func.coalesce(QmCall.closed_at, QmCall.created_at).desc(), QmCall.id.desc()).limit(limit).offset(offset)
+    else:
+        query = query.order_by(QmCall.created_at.asc(), QmCall.id.asc())
+    calls = (await db.execute(query)).scalars().unique().all()
     ids = list({c.child_id for c in calls})
     contacts = await _contacts(db, ids)
-    anchors = await _anchor_dates(db)
+    anchors = await _anchor_dates(db, ids)
+    history = await _history_info(db, ids)
     counts = dict((await db.execute(select(QmCall.status, func.count(QmCall.id)).group_by(QmCall.status))).all())
+    items = []
+    for c in calls:
+        d = _call_dict(c, contacts, anchors)
+        done = history.get(c.child_id, [])
+        if status == "new":
+            d["number"] = len(done) + 1
+            d["previous"] = _brief(done[-1]) if done else None
+        else:
+            idx = next((i for i, x in enumerate(done) if x.id == c.id), len(done) - 1)
+            d["number"] = idx + 1
+            d["previous"] = _brief(done[idx - 1]) if idx > 0 else None
+        items.append(d)
     return {
-        "items": [_call_dict(c, contacts, anchors) for c in calls],
+        "items": items,
+        "total": total or 0,
+        "has_more": status == "done" and offset + len(calls) < (total or 0),
         "counts": {"new": counts.get("new", 0), "all": counts.get("done", 0)},
         "jobs": await _job_times(db),
         **_meta(),
     }
+
+
+@router.get("/calls/history/{child_id}", dependencies=[Depends(require_admin)])
+async def call_history(child_id: int, db: AsyncSession = Depends(get_db)):
+    """Все звонки по ученику — по порядку."""
+    child = await db.scalar(select(ChildProfile).where(ChildProfile.id == child_id).options(joinedload(ChildProfile.user)))
+    if not child:
+        raise HTTPException(status_code=404, detail="Ученик не найден")
+    res = await db.execute(
+        select(QmCall).where(QmCall.child_id == child_id, QmCall.status.in_(("done", "new")))
+        .order_by(QmCall.status.asc(), func.coalesce(QmCall.closed_at, QmCall.created_at).asc(), QmCall.id.asc())
+    )
+    calls = res.scalars().all()
+    items, n = [], 0
+    for c in calls:
+        if c.status == "done":
+            n += 1
+        items.append({
+            "id": c.id, "number": n if c.status == "done" else n + 1, "status": c.status,
+            "reason_label": REASONS.get(c.reason, c.reason), "feedback": c.feedback, "comment": c.comment or "",
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "closed_at": c.closed_at.isoformat() if c.closed_at else None,
+        })
+    return {"child_id": child_id, "student_name": _name(child.user), "crm_status": child.crm_status,
+            "contacts": (await _contacts(db, [child_id])).get(child_id, []), "items": items}
 
 
 class CallCreate(BaseModel):
@@ -536,15 +655,15 @@ def _reg_dict(r: QmRegularity, tutors: dict, contacts: dict) -> dict:
 @router.get("/regularity", dependencies=[Depends(require_admin)])
 async def list_regularity(show_closed: bool = Query(False), db: AsyncSession = Depends(get_db)):
     await run_due_jobs(db)
+    # Закрытые строки тоже показываются: запись остаётся, пока система не увидит
+    # проведённое занятие (тогда удалит её сама)
     q = select(QmRegularity).options(joinedload(QmRegularity.child).joinedload(ChildProfile.user))
-    if not show_closed:
-        q = q.where(QmRegularity.status != "closed")
     rows = (await db.execute(q)).scalars().unique().all()
     ids = list({r.child_id for r in rows})
     tutors = await _tutors(db, ids)
     contacts = await _contacts(db, ids)
     items = [_reg_dict(r, tutors, contacts) for r in rows]
-    items.sort(key=lambda x: (x["status"] == "closed", not x["overdue"], x["last_lesson_date"] or "0000"))
+    items.sort(key=lambda x: (not x["overdue"], x["status"] == "closed", x["last_lesson_date"] or "0000"))
     closed_count = await db.scalar(select(func.count(QmRegularity.id)).where(QmRegularity.status == "closed"))
     return {"items": items, "closed_count": closed_count or 0, "jobs": await _job_times(db), **_meta()}
 
