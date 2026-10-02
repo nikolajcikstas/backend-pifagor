@@ -283,6 +283,7 @@ JOBS = {
     "regularity_refresh": _last_refresh_slot,
     "regularity_nightly": _last_nightly_slot,
     "analytics_snapshot": _last_nightly_slot,  # число клиентов на день — для аналитики
+    "analytics_archive": _last_nightly_slot,   # закрепить итоги прошедших периодов (через 14 дней)
 }
 
 
@@ -309,6 +310,10 @@ async def run_due_jobs(db: AsyncSession, force: bool = False) -> None:
                 elif name == "analytics_snapshot":
                     from app.api.v1.endpoints.analytics import save_today_snapshot
                     await save_today_snapshot(db)
+                elif name == "analytics_archive":
+                    from app.api.v1.endpoints.analytics import freeze_settled
+                    n = await freeze_settled(db)
+                    logger.info("Analytics archive: %s new records", n)
                 else:
                     await nightly_regularity(db)
                 if not job:

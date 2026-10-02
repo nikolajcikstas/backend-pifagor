@@ -24,6 +24,7 @@
 занятиями помечается как предварительная.
 """
 from bisect import bisect_right
+import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -42,7 +43,7 @@ from app.core.deps import require_admin
 from app.db.session import get_db
 from app.models.models import (
     ChildProfile, User, Lesson, LessonStatus, TutorProfile, TutorRateHistory, EmailReceipt,
-    AnalyticsDaily, CrmStatusEvent, AnalyticsClientDay, FreqIssue,
+    AnalyticsDaily, CrmStatusEvent, AnalyticsClientDay, FreqIssue, AnalyticsArchive,
 )
 from app.api.v1.endpoints.quality import _now_minsk
 
@@ -350,6 +351,8 @@ def _freq_agg(weeks: list[dict]) -> dict:
     plan = sum(x["plan_sum"] for x in weeks)
     return {
         "weeks": len(weeks),
+        "from": min(x["week"] for x in weeks).isoformat() if weeks else None,
+        "to": (max(x["week"] for x in weeks) + timedelta(days=6)).isoformat() if weeks else None,
         "n_avg": round(n / len(weeks), 1) if weeks else None,
         "lessons": lessons, "hours": round(hours, 1),
         "k": round(lessons / n, 2) if n else None,
@@ -496,6 +499,8 @@ async def _summary(db: AsyncSession, start: date, end: date, today: date, rate=N
         "freq_plan_k": fq.get("plan_k"),
         "freq_n": fq.get("n_avg"),
         "freq_weeks": fq.get("weeks", 0),
+        "freq_from": fq.get("from"),
+        "freq_to": fq.get("to"),
         "freq_preliminary": fq.get("preliminary", False),
         "avg_rate": round(rate_sum / lessons, 2) if lessons else None,
         "avg_check": round(price_sum / lessons, 2) if lessons else None,
@@ -505,6 +510,209 @@ async def _summary(db: AsyncSession, start: date, end: date, today: date, rate=N
         "tutor_cost": round(rate_sum, 2),
     }
 
+
+# ─── архив итогов ─────────────────────────────────────────────────────────────
+# Через ARCHIVE_SETTLE_DAYS дней после окончания периода (успели отметить
+# занятия и поставить статусы) его итоги записываются в analytics_archive и
+# дальше берутся оттуда. Удаление учеников/репетиторов, правки задним числом и
+# смена формул не меняют прошлые графики.
+
+ARCHIVE_SETTLE_DAYS = 14
+ARCHIVE_VERSION = 1
+
+
+def _settled_until(today: date) -> date:
+    """Последний день, итоги по которому уже закрепляются."""
+    return today - timedelta(days=ARCHIVE_SETTLE_DAYS + 1)
+
+
+def _weeks_in(a: date, b: date) -> list[date]:
+    """Недели (пн), четверг которых попадает в [a, b]."""
+    out, w = [], _monday(a) - timedelta(days=7)
+    while w <= b:
+        if a <= w + timedelta(days=3) <= b:
+            out.append(w)
+        w += timedelta(days=7)
+    return out
+
+
+def _drange(a: date, b: date):
+    d = a
+    while d <= b:
+        yield d
+        d += timedelta(days=1)
+
+
+def _json_default(x):
+    if isinstance(x, (date, datetime)):
+        return x.isoformat()
+    if isinstance(x, set):
+        return sorted(x)
+    raise TypeError(type(x))
+
+
+async def _arch_load(db: AsyncSession, kind: str, keys) -> dict[str, dict]:
+    keys = sorted(set(keys))
+    out: dict[str, dict] = {}
+    for i in range(0, len(keys), 500):
+        for k, data in (await db.execute(
+            select(AnalyticsArchive.key, AnalyticsArchive.data)
+            .where(AnalyticsArchive.kind == kind, AnalyticsArchive.key.in_(keys[i:i + 500]))
+        )).all():
+            out[k] = json.loads(data)
+    return out
+
+
+async def _day_facts(db: AsyncSession, a: date, b: date, today: date, rate=None) -> dict[date, dict]:
+    """По дням [a, b]: ученики на проведённых занятиях, занятия, пробные и
+    нагрузка репетиторов по статусам (занятия, часы, ученики, пробные, сумма ставок)."""
+    out = {d: {"students": set(), "lessons": 0, "trials": 0, "tutors": {}, "tn": {}} for d in _drange(a, b)}
+    for cid, d, is_tr in (await db.execute(
+        select(Lesson.child_id, Lesson.date, _is_trial()).where(_held(today), Lesson.date >= a, Lesson.date <= b)
+    )).all():
+        x = out[d]
+        x["students"].add(cid)
+        x["lessons"] += 1
+        if is_tr:
+            x["trials"] += 1
+    rate = rate or await _rates(db)
+    names = {tid: f"{ln or ''} {fn or ''}".strip() for tid, ln, fn in (await db.execute(
+        select(TutorProfile.id, User.last_name, User.first_name).join(User, User.id == TutorProfile.user_id)
+    )).all()}
+    for tid, cid, d, st, is_tr, h in (await db.execute(
+        select(Lesson.tutor_id, Lesson.child_id, Lesson.date, Lesson.status, _is_trial(), _hours_expr())
+        .where(Lesson.date >= a, Lesson.date <= b)
+    )).all():
+        x = out[d]
+        t = x["tutors"].setdefault(str(tid), {})
+        s = t.setdefault(st.value if hasattr(st, "value") else str(st), {"l": 0, "h": 0.0, "c": [], "t": 0, "rs": 0.0})
+        s["l"] += 1
+        s["h"] += float(h or 0)
+        if cid not in s["c"]:
+            s["c"].append(cid)
+        if is_tr:
+            s["t"] += 1
+        elif st == LessonStatus.completed:
+            s["rs"] += rate(tid, d)
+        if tid in names:
+            x["tn"][str(tid)] = names[tid]
+    return out
+
+
+async def _came_left_by_day(db: AsyncSession, today: date) -> tuple[dict, dict, dict]:
+    """Пришли (и из них сейчас «Клиент») и ушли — по дням, за всё время.
+    Пришёл: с 01.10.2026 — дата добавления в CRM, раньше — первое занятие.
+    Ушёл: статус «Отказ»/«Не занимаются» — дата смены статуса, для старых — последнее занятие."""
+    first_lesson = dict((await db.execute(
+        select(Lesson.child_id, func.min(Lesson.date)).where(_held(today)).group_by(Lesson.child_id)
+    )).all())
+    last_lesson = dict((await db.execute(
+        select(Lesson.child_id, func.max(Lesson.date)).where(_held(today)).group_by(Lesson.child_id)
+    )).all())
+    left_events = dict((await db.execute(
+        select(CrmStatusEvent.child_id, func.max(CrmStatusEvent.changed_at))
+        .where(CrmStatusEvent.new_status.in_(LEFT_STATUSES)).group_by(CrmStatusEvent.child_id)
+    )).all())
+    came, conv, left = defaultdict(int), defaultdict(int), defaultdict(int)
+    for cid, status, is_active, created_at in (await db.execute(
+        select(ChildProfile.id, ChildProfile.crm_status, User.is_active, User.created_at).join(User, User.id == ChildProfile.user_id)
+    )).all():
+        added = (created_at + timedelta(hours=3)).date() if created_at else None
+        f = added if (added is not None and added >= ARRIVAL_BY_CRM_FROM) else first_lesson.get(cid)
+        if f:
+            came[f] += 1
+            if status == CLIENT:
+                conv[f] += 1
+        if status in LEFT_STATUSES or is_active is False:
+            ev = left_events.get(cid)
+            ld = (ev + timedelta(hours=3)).date() if ev else last_lesson.get(cid)
+            if ld:
+                left[ld] += 1
+    return came, conv, left
+
+
+async def freeze_settled(db: AsyncSession) -> int:
+    """Закрепить итоги всех прошедших периодов, которые ещё не в архиве.
+    Первый запуск заполняет архив за всю историю. Возвращает число записей."""
+    today = _now_minsk().date()
+    su = _settled_until(today)
+    first = await db.scalar(select(func.min(Lesson.date)))
+    if not first or first > su:
+        return 0
+    have = {(k, key) for k, key in (await db.execute(select(AnalyticsArchive.kind, AnalyticsArchive.key))).all()}
+    rows: list[tuple[str, str, dict]] = []
+    rate = await _rates(db)
+
+    need_days = [d for d in _drange(first, su) if ("day", d.isoformat()) not in have]
+    if need_days:
+        facts = await _day_facts(db, need_days[0], need_days[-1], today, rate)
+        came, conv, left = await _came_left_by_day(db, today)
+        active, _, _ = await _active_by_day(db, need_days[0], need_days[-1], today)
+        for d in need_days:
+            f = facts[d]
+            rows.append(("day", d.isoformat(), {
+                "students": len(f["students"]), "lessons": f["lessons"], "trials": f["trials"],
+                "tutors": f["tutors"], "tn": f["tn"],
+                "came": came.get(d, 0), "came_clients": conv.get(d, 0), "left": left.get(d, 0),
+                "active": active.get(d),
+            }))
+
+    need_weeks = []
+    w = _monday(first)
+    while w + timedelta(days=6) <= su:
+        if ("week", w.isoformat()) not in have:
+            need_weeks.append(w)
+        w += timedelta(days=7)
+    months, years = [], []
+    m = date(first.year, first.month, 1)
+    while True:
+        nxt = date(m.year + (m.month == 12), m.month % 12 + 1, 1)
+        if nxt - timedelta(days=1) > su:
+            break
+        if ("month", m.isoformat()[:7]) not in have:
+            months.append((m, nxt - timedelta(days=1)))
+        m = nxt
+    for y in range(first.year, su.year + 1):
+        if date(y, 12, 31) <= su and ("year", str(y)) not in have:
+            years.append((date(y, 1, 1), date(y, 12, 31)))
+    wk_needed = set(need_weeks)
+    for a, b in months + years:
+        wk_needed.update(_weeks_in(a, b))
+    wk: dict[date, dict] = {}
+    if wk_needed:
+        calc = await _freq_calc(db, min(wk_needed), max(wk_needed), today)
+        for x in wk_needed:
+            wk[x] = calc.week(x)
+    for w in need_weeks:
+        fq = _freq_agg([wk[w]])
+        rows.append(("week", w.isoformat(), {"k": wk[w], "summary": await _summary(db, w, w + timedelta(days=6), today, rate, fq)}))
+    for kind, periods in (("month", months), ("year", years)):
+        for a, b in periods:
+            fq = _freq_agg([wk[x] for x in _weeks_in(a, b)])
+            s = await _summary(db, a, b, today, rate, fq)
+            rows.append((kind, a.isoformat()[:7] if kind == "month" else str(a.year), {
+                "summary": s, "h_students": s.get("students", 0),
+                "h_lessons": s.get("lessons", 0) + s.get("trials", 0), "h_trials": s.get("trials", 0),
+            }))
+    if rows:
+        now = datetime.utcnow()
+        for i in range(0, len(rows), 200):
+            vals = [{"kind": k, "key": key, "frozen_at": now,
+                     "data": json.dumps({**data, "v": ARCHIVE_VERSION}, default=_json_default, ensure_ascii=False)}
+                    for k, key, data in rows[i:i + 200]]
+            await db.execute(pg_insert(AnalyticsArchive).values(vals).on_conflict_do_nothing(index_elements=["kind", "key"]))
+        await db.commit()
+    return len(rows)
+
+
+def _arch_week(x: dict) -> dict:
+    k = dict(x["k"])
+    k["week"] = date.fromisoformat(k["week"])
+    k["complete"] = True
+    return k
+
+
+# ─── основной отчёт ───────────────────────────────────────────────────────────
 
 @router.get("/overview", dependencies=[Depends(require_admin)])
 async def overview(
@@ -519,6 +727,7 @@ async def overview(
     first_day = await _first_day(db, today)
     start, end, label = _period(grain, anchor, first_day, today)
     kind_students, kind_dyn = GRAIN_BUCKETS[grain]
+    su = _settled_until(today)
 
     # 1. ученики по дням / месяцам / годам + скользящее среднее
     #    (дни — за 7 дней, месяцы — за 3 месяца; только завершённые дни/месяцы)
@@ -533,6 +742,11 @@ async def overview(
         q_from = start
     pre = _buckets(kind_students, q_from, start - timedelta(days=1)) if q_from < start else []
     allb = pre + sb
+    arch_kind = {"day": "day", "month": "month", "year": "year"}[kind_students]
+    arch_key = (lambda b: b["start"].isoformat()) if arch_kind == "day" else \
+        (lambda b: b["start"].isoformat()[:7]) if arch_kind == "month" else (lambda b: str(b["start"].year))
+    frozen_b = [b for b in allb if b["end"] <= su]
+    arch = await _arch_load(db, arch_kind, [arch_key(b) for b in frozen_b])
     apos = _bucket_of(allb)
     sets = [set() for _ in allb]
     les = [0] * len(allb)
@@ -546,26 +760,25 @@ async def overview(
             les[i] += 1
             if is_tr:
                 trl[i] += 1
+    cnt = [len(s) for s in sets]
+    for i, b in enumerate(allb):
+        a_ = arch.get(arch_key(b)) if b["end"] <= su else None
+        if a_ is not None:  # закреплённые итоги
+            if arch_kind == "day":
+                cnt[i], les[i], trl[i] = a_["students"], a_["lessons"], a_["trials"]
+            else:
+                cnt[i], les[i], trl[i] = a_["h_students"], a_["h_lessons"], a_["h_trials"]
     students_series = []
     for i, b in enumerate(sb):
         j = len(pre) + i
         ma = None
         if ma_n and b["end"] < today and j + 1 >= ma_n:
-            ma = round(sum(len(sets[k]) for k in range(j - ma_n + 1, j + 1)) / ma_n, 1)
+            ma = round(sum(cnt[k] for k in range(j - ma_n + 1, j + 1)) / ma_n, 1)
         students_series.append({"key": b["key"], "label": b["label"], "date": b["start"].isoformat(),
-                                "wd": b["start"].weekday(), "students": len(sets[j]), "lessons": les[j],
+                                "wd": b["start"].weekday(), "students": cnt[j], "lessons": les[j],
                                 "trials": trl[j], "ma": ma, "future": b["start"] > today})
 
     # 2. коэффициент частотности: полные календарные недели, «устоявшиеся» клиенты
-    def weeks_in(a: date, b: date) -> list[date]:
-        """Недели (пн), четверг которых попадает в [a, b]."""
-        out, w = [], _monday(a) - timedelta(days=7)
-        while w <= b:
-            if a <= w + timedelta(days=3) <= b:
-                out.append(w)
-            w += timedelta(days=7)
-        return out
-
     if grain == "week":
         w_sel = _monday(start)
         groups = [(w.isoformat(), f"{w.strftime('%d.%m')}–{(w + timedelta(days=6)).strftime('%d.%m')}", [w])
@@ -573,30 +786,39 @@ async def overview(
         f_unit = "week"
     elif grain == "month":
         # недели месяца + 4 недели до него (для сравнения; в итог месяца не входят)
-        mw = weeks_in(start, end)
+        mw = _weeks_in(start, end)
         groups = [(w.isoformat(), f"{w.strftime('%d.%m')}–{(w + timedelta(days=6)).strftime('%d.%m')}", [w])
                   for w in [mw[0] - timedelta(weeks=k) for k in (4, 3, 2, 1)] + mw]
         f_unit = "week"
     else:
-        groups = [(b["key"], b["label"], weeks_in(b["start"], b["end"])) for b in _buckets("month", start, end)]
+        groups = [(b["key"], b["label"], _weeks_in(b["start"], b["end"])) for b in _buckets("month", start, end)]
         f_unit = "month"
     p_start = p_end = None
+    partial = start <= today < end
     if grain != "all":
         p_start, p_end, _ = _period(grain, start - timedelta(days=1), first_day, today)
-        if start <= today < end:
+        if partial:
             p_end = min(p_end, p_start + (today - start))
-    all_weeks = [w for g in groups for w in g[2]] + weeks_in(start, end) + (weeks_in(p_start, p_end) if p_start else [])
-    calc = await _freq_calc(db, min(all_weeks), max(all_weeks), today) if all_weeks else None
+    # последняя полная неделя периода (для недели — из показанных 12 недель)
+    cands = [w for w in ([w for g in groups for w in g[2]] if grain == "week" else _weeks_in(start, end))
+             if w + timedelta(days=6) < today]
+    lw = max(cands) if cands else None
+    all_weeks = sorted(set([w for g in groups for w in g[2]] + _weeks_in(start, end)
+                           + (_weeks_in(p_start, p_end) if p_start else [])))
+    arch_w = await _arch_load(db, "week", [w.isoformat() for w in all_weeks if w + timedelta(days=6) <= su])
+    live_weeks = [w for w in all_weeks if w.isoformat() not in arch_w]
+    calc = await _freq_calc(db, min(live_weeks), max(live_weeks), today) if live_weeks else None
     wk_cache: dict[date, dict] = {}
 
     def wk(w: date) -> dict:
         if w not in wk_cache:
-            wk_cache[w] = calc.week(w)
+            a_ = arch_w.get(w.isoformat())
+            wk_cache[w] = _arch_week(a_) if a_ is not None else calc.week(w)
         return wk_cache[w]
 
     freq_series = []
     for key, lbl, ws in groups:
-        if not ws or calc is None:
+        if not ws:
             continue
         ag = _freq_agg([wk(w) for w in ws])
         if not ag["weeks"]:
@@ -606,59 +828,40 @@ async def overview(
         freq_series.append(ag)
     while freq_series and not freq_series[0]["n_avg"]:
         freq_series.pop(0)  # недели до первых клиентов не показываем
-    fq_cur = _freq_agg([wk(w) for w in weeks_in(start, end)]) if calc else {}
-    fq_prev = _freq_agg([wk(w) for w in weeks_in(p_start, p_end)]) if (calc and p_start) else {}
+    fq_cur = _freq_agg([wk(w) for w in _weeks_in(start, end)])
+    fq_prev = _freq_agg([wk(w) for w in _weeks_in(p_start, p_end)]) if p_start else {}
+    x = wk(lw) if lw else None
     last_week = None
-    if calc:
-        lw = _monday(min(end, today))
-        if lw + timedelta(days=6) >= today:
-            lw -= timedelta(days=7)  # последняя полная неделя
-        if min(all_weeks) <= lw <= max(all_weeks):
-            x = wk(lw)
-            last_week = {"week_start": lw.isoformat(),
-                         "label": f"{lw.strftime('%d.%m')}–{(lw + timedelta(days=6)).strftime('%d.%m')}",
-                         **{k: x[k] for k in ("n", "lessons", "plan_sum", "newcomers", "left", "no_plan", "unmarked")}}
+    if x and x["complete"]:
+        last_week = {"week_start": lw.isoformat(),
+                     "label": f"{lw.strftime('%d.%m')}–{(lw + timedelta(days=6)).strftime('%d.%m')}",
+                     **{k: x[k] for k in ("n", "lessons", "plan_sum", "newcomers", "left", "no_plan", "unmarked")}}
 
-    # 5. динамика: пришли / ушли
+    # 5. динамика: пришли / ушли (по дням; закреплённые дни — из архива)
     db_b = _buckets(kind_dyn, start, end)
     dpos = _bucket_of(db_b)
-    first_lesson = dict((await db.execute(
-        select(Lesson.child_id, func.min(Lesson.date)).where(_held(today)).group_by(Lesson.child_id)
-    )).all())
-    last_lesson = dict((await db.execute(
-        select(Lesson.child_id, func.max(Lesson.date)).where(_held(today)).group_by(Lesson.child_id)
-    )).all())
-    left_events = dict((await db.execute(
-        select(CrmStatusEvent.child_id, func.max(CrmStatusEvent.changed_at))
-        .where(CrmStatusEvent.new_status.in_(LEFT_STATUSES)).group_by(CrmStatusEvent.child_id)
-    )).all())
-    children = (await db.execute(
-        select(ChildProfile.id, ChildProfile.crm_status, User.is_active, User.created_at).join(User, User.id == ChildProfile.user_id)
-    )).all()
+    arch_d = await _arch_load(db, "day", [d.isoformat() for d in _drange(start, min(end, su))])
+    l_came, l_conv, l_left = await _came_left_by_day(db, today)
     came = [0] * len(db_b)
     left = [0] * len(db_b)
-    came_ids, converted = [], 0
-    for cid, status, is_active, created_at in children:
-        added = (created_at + timedelta(hours=3)).date() if created_at else None
-        if added is not None and added >= ARRIVAL_BY_CRM_FROM:
-            f = added  # добавлен в CRM с октября 2026 — считаем по дате добавления
+    converted = 0
+    for d in _drange(start, end):
+        i = dpos(d)
+        if i is None:
+            continue
+        a_ = arch_d.get(d.isoformat()) if d <= su else None
+        if a_ is not None:
+            c, cc, lf = a_["came"], a_["came_clients"], a_["left"]
         else:
-            f = first_lesson.get(cid)  # старые ученики — по первому занятию
-        if f and start <= f <= end:
-            i = dpos(f)
-            if i is not None:
-                came[i] += 1
-                came_ids.append(cid)
-                if status == CLIENT:
-                    converted += 1
-        if status in LEFT_STATUSES or is_active is False:
-            ev = left_events.get(cid)
-            ld = (ev + timedelta(hours=3)).date() if ev else last_lesson.get(cid)
-            if ld and start <= ld <= end:
-                i = dpos(ld)
-                if i is not None:
-                    left[i] += 1
-    base_active = (await _active_by_day(db, start, start, today))[0].get(start) if start <= today else None
+            c, cc, lf = l_came.get(d, 0), l_conv.get(d, 0), l_left.get(d, 0)
+        came[i] += c
+        converted += cc
+        left[i] += lf
+    a0 = arch_d.get(start.isoformat()) if start <= su else None
+    if a0 is not None:
+        base_active = a0.get("active")
+    else:
+        base_active = (await _active_by_day(db, start, start, today))[0].get(start) if start <= today else None
     total_came, total_left = sum(came), sum(left)
     dynamics = {
         "series": [{"key": b["key"], "label": b["label"], "came": came[i], "left": left[i], "future": b["start"] > today}
@@ -687,37 +890,44 @@ async def overview(
             select(TutorProfile.id, User.last_name, User.first_name).join(User, User.id == TutorProfile.user_id)
         )).all()}
         for cid, tid, d, ts, te, st, m in odd_rows:
-            x = odd.setdefault(cid, {"child_id": cid, "name": names.get(cid, ""), "tutors": [], "count": 0, "durations": {}, "lessons": []})
-            x["count"] += 1
+            o = odd.setdefault(cid, {"child_id": cid, "name": names.get(cid, ""), "tutors": [], "count": 0, "durations": {}, "lessons": []})
+            o["count"] += 1
             mm = int(m or 0)
-            x["durations"][mm] = x["durations"].get(mm, 0) + 1
+            o["durations"][mm] = o["durations"].get(mm, 0) + 1
             tn = tnames.get(tid)
-            if tn and tn not in x["tutors"]:
-                x["tutors"].append(tn)
-            if len(x["lessons"]) < 5:
-                x["lessons"].append({"date": d.isoformat(), "time": f"{ts.strftime('%H:%M')}–{te.strftime('%H:%M')}", "minutes": mm})
-    odd_list = sorted(odd.values(), key=lambda x: (-x["count"], x["name"]))
-    for x in odd_list:
-        x["durations"] = [{"minutes": k, "count": v} for k, v in sorted(x["durations"].items())]
+            if tn and tn not in o["tutors"]:
+                o["tutors"].append(tn)
+            if len(o["lessons"]) < 5:
+                o["lessons"].append({"date": d.isoformat(), "time": f"{ts.strftime('%H:%M')}–{te.strftime('%H:%M')}", "minutes": mm})
+    odd_list = sorted(odd.values(), key=lambda o: (-o["count"], o["name"]))
+    for o in odd_list:
+        o["durations"] = [{"minutes": k, "count": v} for k, v in sorted(o["durations"].items())]
 
-    # итоги и сравнение с прошлым периодом
+    # итоги и сравнение с прошлым периодом (закреплённые периоды — из архива)
+    def arch_ref(g: str, a: date) -> Optional[tuple[str, str]]:
+        return {"week": ("week", a.isoformat()), "month": ("month", a.isoformat()[:7]), "year": ("year", str(a.year))}.get(g)
+
+    async def period_summary(a: date, b: date, fq: dict, full: bool) -> dict:
+        ref = arch_ref(grain, a)
+        if full and ref and b <= su:
+            got = await _arch_load(db, ref[0], [ref[1]])
+            if ref[1] in got:
+                return dict(got[ref[1]]["summary"])
+        return await _summary(db, a, b, today, rate, fq)
+
     rate = await _rates(db)
-    summary = await _summary(db, start, end, today, rate, fq_cur)
+    summary = await period_summary(start, end, fq_cur, True)
     if grain == "all":
         prev = None
     else:
-        p_anchor = start - timedelta(days=1)
-        ps, pe, plabel = _period(grain, p_anchor, first_day, today)
-        partial = start <= today < end
-        if partial:
-            # текущий период ещё идёт — сравниваем с тем же числом дней прошлого периода
-            pe = min(pe, ps + (today - start))
-        prev = await _summary(db, ps, pe, today, rate, fq_prev)
-        prev["label"] = plabel
+        p_full_end = _period(grain, start - timedelta(days=1), first_day, today)[1]
+        prev = await period_summary(p_start, p_end, fq_prev, p_end == p_full_end)
+        prev["label"] = _period(grain, start - timedelta(days=1), first_day, today)[2]
         prev["partial"] = partial
 
     return {
         "grain": grain, "label": label, "start": start.isoformat(), "end": end.isoformat(), "today": today.isoformat(),
+        "settled_until": su.isoformat(),
         "summary": summary, "previous": prev,
         "students_series": students_series,
         "freq": {"series": freq_series, "unit": f_unit, "last_week": last_week},
@@ -739,48 +949,62 @@ async def tutors_load(
     db: AsyncSession = Depends(get_db),
 ):
     """Занятия, часы и ученики по каждому репетитору: неделя — по дням,
-    месяц — по неделям, год — по месяцам."""
+    месяц — по неделям, год — по месяцам. Закреплённые дни — из архива."""
     today = _now_minsk().date()
     anchor = anchor or today
     first_day = await _first_day(db, today)
     start, end, label = _period(grain, anchor, first_day, today)
+    su = _settled_until(today)
     kind = GRAIN_BUCKETS[grain][1]
     buckets = _buckets(kind, start, end)
     pos = _bucket_of(buckets)
     wanted = [s for s in statuses.split(",") if s in STATUS_KEYS] or ["completed", "trial"]
-    rows = (await db.execute(
-        select(Lesson.tutor_id, Lesson.child_id, Lesson.date, Lesson.status, _is_trial(), _hours_expr())
-        .where(Lesson.date >= start, Lesson.date <= end, Lesson.status.in_([LessonStatus(s) for s in wanted]))
-    )).all()
+    arch = await _arch_load(db, "day", [d.isoformat() for d in _drange(start, min(end, su))])
+    live_days = [d for d in _drange(start, end) if d.isoformat() not in arch]
+    live = await _day_facts(db, live_days[0], live_days[-1], today) if live_days else {}
     names = {tid: f"{ln or ''} {fn or ''}".strip() for tid, ln, fn in (await db.execute(
         select(TutorProfile.id, User.last_name, User.first_name).join(User, User.id == TutorProfile.user_id)
     )).all()}
-    rate = await _rates(db)
     per = defaultdict(lambda: {"lessons": [0] * len(buckets), "hours": [0.0] * len(buckets),
                                "students": [set() for _ in buckets], "all_students": set(),
-                               "trials": 0, "rates": []})
-    for tid, cid, d, st, is_trial, h in rows:
+                               "trials": 0, "rate_sum": 0.0, "rate_n": 0, "name": None})
+    for d in _drange(start, end):
         i = pos(d)
         if i is None:
             continue
-        t = per[tid]
-        t["lessons"][i] += 1
-        t["hours"][i] += float(h or 0)
-        t["students"][i].add(cid)
-        t["all_students"].add(cid)
-        if is_trial:
-            t["trials"] += 1
-        elif st == LessonStatus.completed:
-            t["rates"].append(rate(tid, d))
+        day = arch.get(d.isoformat())
+        if day is None:
+            day = live.get(d)
+            if day is None:
+                continue
+        for tid_s, sts in day["tutors"].items():
+            tid = int(tid_s)
+            t = per[tid]
+            if not t["name"]:
+                t["name"] = day.get("tn", {}).get(tid_s)
+            for st in wanted:
+                s = sts.get(st)
+                if not s:
+                    continue
+                t["lessons"][i] += s["l"]
+                t["hours"][i] += s["h"]
+                t["students"][i].update(s["c"])
+                t["all_students"].update(s["c"])
+                t["trials"] += s["t"]
+                if st == "completed":
+                    t["rate_sum"] += s["rs"]
+                    t["rate_n"] += s["l"] - s["t"]
     tutors = []
     for tid, t in per.items():
+        if not sum(t["lessons"]):
+            continue
         tutors.append({
-            "id": tid, "name": names.get(tid) or f"Репетитор #{tid}",
+            "id": tid, "name": names.get(tid) or t["name"] or f"Репетитор #{tid}",
             "lessons": t["lessons"], "hours": [round(x, 1) for x in t["hours"]],
             "students": [len(s) for s in t["students"]],
             "total": {"lessons": sum(t["lessons"]), "hours": round(sum(t["hours"]), 1),
                       "students": len(t["all_students"]), "trials": t["trials"]},
-            "avg_rate": round(sum(t["rates"]) / len(t["rates"]), 2) if t["rates"] else None,
+            "avg_rate": round(t["rate_sum"] / t["rate_n"], 2) if t["rate_n"] else None,
         })
     tutors.sort(key=lambda x: (-x["total"]["lessons"], x["name"]))
     return {

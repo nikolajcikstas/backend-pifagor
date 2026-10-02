@@ -754,3 +754,15 @@ class FreqIssue(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     resolved_by: Mapped[Optional[str]] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AnalyticsArchive(Base):
+    """Закреплённые итоги аналитики за прошедшие периоды (день/неделя/месяц/год).
+    Записываются через 14 дней после окончания периода и больше не меняются —
+    удаление учеников/репетиторов или правки задним числом не меняют прошлые графики."""
+    __tablename__ = "analytics_archive"
+
+    kind: Mapped[str] = mapped_column(String(10), primary_key=True)
+    key: Mapped[str] = mapped_column(String(16), primary_key=True)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
