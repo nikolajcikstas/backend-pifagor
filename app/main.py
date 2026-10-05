@@ -146,17 +146,34 @@ async def _schema_is_current(marker: str) -> bool:
         return False  # таблицы ещё нет или база недоступна — делаем полную настройку
 
 
-async def _prepare_database() -> None:
+async def _prepare_database() -> bool:
     marker = _schema_fingerprint()
     if await _schema_is_current(marker):
         logger.info("Database schema is up to date (%s) — skipping initialization", marker)
-        return
+        return True
     if await _init_database_schema():
         try:
             async with engine.begin() as conn:
                 await conn.execute(text("INSERT INTO app_data_migrations (name) VALUES (:n) ON CONFLICT (name) DO NOTHING"), {"n": marker})
         except Exception:
             logger.exception("Could not store schema marker")
+        return True
+    return False
+
+
+async def _schema_retry_task() -> None:
+    """Если при запуске настроить базу не удалось (например, при деплое старая
+    копия сервера ещё держала таблицы), повторяем в фоне, пока не получится."""
+    delay = 20
+    for _ in range(30):
+        await asyncio.sleep(delay)
+        try:
+            if await _prepare_database():
+                logger.info("Database schema initialization succeeded on retry")
+                return
+        except Exception:
+            logger.exception("Schema retry failed")
+        delay = min(delay * 2, 300)
 
 
 async def _init_database_schema() -> bool:
@@ -167,6 +184,9 @@ async def _init_database_schema() -> bool:
     try:
         async with asyncio.timeout(120):
             async with engine.begin() as conn:
+                # не ждать блокировку таблицы бесконечно: при деплое старая копия
+                # сервера может её держать — тогда повторим позже, а не зависнем
+                await conn.execute(text("SET LOCAL lock_timeout = '8s'"))
                 await conn.run_sync(Base.metadata.create_all)
 
                 for sql in (
@@ -279,8 +299,11 @@ async def _init_database_schema() -> bool:
                     try:
                         async with conn.begin_nested():
                             await conn.execute(text(sql))
-                    except Exception:
+                    except Exception as e:
                         failures += 1
+                        if "lock timeout" in str(e).lower() or "LockNotAvailable" in type(getattr(e, "orig", e)).__name__:
+                            logger.warning("Table is locked by another connection, will retry later: %s", sql[:120])
+                            break
                         logger.exception("Schema statement failed (continuing): %s", sql[:120])
 
                 for name, slug in (
@@ -342,12 +365,15 @@ async def _init_database_schema() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _prepare_database()
+    schema_ok = await _prepare_database()
     from app.api.v1.endpoints.quality import qm_scheduler_task
     task = asyncio.create_task(_daily_email_task())
     qm_task = asyncio.create_task(qm_scheduler_task())
+    tasks = [task, qm_task]
+    if not schema_ok:
+        tasks.append(asyncio.create_task(_schema_retry_task()))
     yield
-    for t in (task, qm_task):
+    for t in tasks:
         t.cancel()
         try:
             await t
