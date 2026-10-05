@@ -146,11 +146,36 @@ async def _schema_is_current(marker: str) -> bool:
         return False  # таблицы ещё нет или база недоступна — делаем полную настройку
 
 
+async def _db_sessions_report(kill_stuck: bool) -> None:
+    """Кто ещё подключён к базе. Зависшие подключения («idle in transaction»
+    дольше 30 секунд — например, от прошлой копии сервера) закрываем: они
+    держат таблицы, и добавить новые колонки не получается."""
+    try:
+        async with asyncio.timeout(15):
+            async with engine.connect() as conn:
+                rows = (await conn.execute(text(
+                    "SELECT pid, state, EXTRACT(EPOCH FROM now() - COALESCE(xact_start, query_start))::int AS age, "
+                    "LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 120) AS q "
+                    "FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND backend_type = 'client backend'"
+                ))).all()
+                for pid, state, age, q in rows:
+                    stuck = kill_stuck and state in ("idle in transaction", "idle in transaction (aborted)") and (age or 0) > 30
+                    logger.warning("DB session pid=%s state=%s age=%ss%s query=%s", pid, state, age,
+                                   " -> closing (stuck)" if stuck else "", q)
+                    if stuck:
+                        await conn.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+                await conn.commit()
+    except Exception as e:
+        logger.warning("Could not inspect DB sessions: %s", e)
+
+
 async def _prepare_database() -> bool:
     marker = _schema_fingerprint()
     if await _schema_is_current(marker):
         logger.info("Database schema is up to date (%s) — skipping initialization", marker)
         return True
+    await _db_sessions_report(kill_stuck=True)
     if await _init_database_schema():
         try:
             async with engine.begin() as conn:
@@ -169,7 +194,7 @@ async def _schema_retry_task() -> None:
         await asyncio.sleep(delay)
         try:
             if await _prepare_database():
-                logger.info("Database schema initialization succeeded on retry")
+                logger.warning("SCHEMA ready on retry")
                 return
         except Exception:
             logger.exception("Schema retry failed")
@@ -302,7 +327,7 @@ async def _init_database_schema() -> bool:
                     except Exception as e:
                         failures += 1
                         if "lock timeout" in str(e).lower() or "LockNotAvailable" in type(getattr(e, "orig", e)).__name__:
-                            logger.warning("Table is locked by another connection, will retry later: %s", sql[:120])
+                            logger.warning("SCHEMA: table is locked by another connection, will retry later: %s", sql[:120])
                             break
                         logger.exception("Schema statement failed (continuing): %s", sql[:120])
 
@@ -353,13 +378,14 @@ async def _init_database_schema() -> bool:
                     failures += 1
                     logger.exception("One-time data migration failed (continuing)")
 
-        logger.info("Database schema initialization complete (failures: %s)", failures)
+        logger.warning("SCHEMA initialization finished (failures: %s)", failures)
         return failures == 0
-    except Exception:
+    except Exception as e:
         # Render free tier / cold DB can time out; keep the web process alive.
         logger.exception(
             "Database schema initialization failed; service will keep running and retry via requests"
         )
+        logger.warning("SCHEMA INIT FAILED: %s: %s", type(e).__name__, str(e)[:300])
         return False
 
 
