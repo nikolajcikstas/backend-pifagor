@@ -744,7 +744,7 @@ async def get_parent_finance(
     rows = await compute_finance_rows(db, child_ids=child_ids)
     lessons_paid = sum(r.lessons_paid for r in rows)
     lessons_conducted = sum(r.lessons_conducted for r in rows)
-    debt = sum(max(0.0, r.lessons_conducted * r.lesson_price - r.amount_paid) for r in rows)
+    debt = sum(r.debt for r in rows)  # по ценам на даты занятий (история цен)
 
     receipts_res = await db.execute(
         select(EmailReceipt)

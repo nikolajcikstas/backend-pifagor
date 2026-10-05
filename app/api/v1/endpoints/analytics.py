@@ -77,6 +77,10 @@ def _log_status_change(target, value, oldvalue, initiator):
         sess = object_session(target)
         if sess is not None:
             sess.add(CrmStatusEvent(child_id=st.identity[0], old_status=old, new_status=value, changed_at=datetime.utcnow()))
+        if value == CLIENT and not getattr(target, "ref_code", None):
+            # реферальный код выдаётся, когда ученик становится клиентом
+            from app.services.referrals import new_code
+            target.ref_code = new_code()
     except Exception:  # история — вспомогательная, не должна мешать сохранению
         logger.exception("Не удалось записать смену CRM-статуса")
 
@@ -474,10 +478,14 @@ async def _summary(db: AsyncSession, start: date, end: date, today: date, rate=N
     fq = fq or {}
     # ставка репетитора и средний чек — по обычным проведённым занятиям
     rate = rate or await _rates(db)
-    price_sum = float(await db.scalar(
-        select(func.coalesce(func.sum(ChildProfile.lesson_price), 0)).select_from(Lesson)
-        .join(ChildProfile, ChildProfile.id == Lesson.child_id).where(regular)
-    ) or 0)
+    # средний чек — по цене ученика, действовавшей на дату занятия (история цен)
+    from app.services.pricing import load_prices
+    book = await load_prices(db)
+    price_sum = 0.0
+    for cid, d, cnt in (await db.execute(
+        select(Lesson.child_id, Lesson.date, func.count(Lesson.id)).where(regular).group_by(Lesson.child_id, Lesson.date)
+    )).all():
+        price_sum += book.price(cid, d) * cnt
     # ставка зависит от репетитора и даты — считаем по группам (репетитор, день)
     rate_sum = 0.0
     for t, d, cnt in (await db.execute(
@@ -1026,7 +1034,7 @@ async def finance_state(db: AsyncSession = Depends(get_db)):
     debtors, ahead = [], []
     for r in rows:
         price = float(r.lesson_price or 0)
-        debt = max(0.0, r.lessons_conducted * price - float(r.amount_paid or 0))
+        debt = float(r.debt)  # проведено по ценам на даты занятий − оплачено
         extra = max(0, (r.lessons_paid or 0) - (r.lessons_conducted or 0))
         if debt > 0.009:
             debtors.append({"child_id": r.child_id, "name": r.student_name, "amount": round(debt, 2),

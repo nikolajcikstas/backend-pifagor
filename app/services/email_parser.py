@@ -309,16 +309,62 @@ async def _find_child_by_payer_name(payer_name: str, db: AsyncSession) -> Option
     return None
 
 
+async def _payer_matcher(db: AsyncSession):
+    """Сопоставление «плательщик → ученики» для многих чеков сразу: ручные
+    привязки и все ученики с родителями загружаются один раз (раньше — заново
+    на каждый чек, сотни запросов). Правила те же, что у _resolve_payer_children."""
+    from sqlalchemy.orm import joinedload
+    from app.models.models import User, ParentProfile, ParentChild, ChildProfile, RoleEnum, PayerChildLink
+
+    links: dict[str, set] = {}
+    for norm, cid in (await db.execute(select(PayerChildLink.payer_name_normalized, PayerChildLink.child_id))).all():
+        links.setdefault(norm, set()).add(cid)
+    result = await db.execute(
+        select(ChildProfile)
+        .options(
+            joinedload(ChildProfile.user),
+            joinedload(ChildProfile.parents).joinedload(ParentChild.parent).joinedload(ParentProfile.user),
+        )
+        .join(ChildProfile.user)
+        .where(User.role == RoleEnum.child, User.is_active == True)
+    )
+    people = []
+    for child in result.scalars().unique().all():
+        names = [_full_name(child.user)]
+        names.extend(_full_name(link.parent.user) for link in child.parents if link.parent and link.parent.user)
+        people.append((child.id, names))
+    cache: dict[str, list[int]] = {}
+
+    def match(payer_name: str) -> list[int]:
+        if payer_name in cache:
+            return cache[payer_name]
+        normalized = _normalize_name(payer_name)
+        if normalized and links.get(normalized):
+            res = list(links[normalized])
+        else:
+            found = {cid for cid, names in people
+                     if any(_same_person(payer_name, n) or _single_token_owner(payer_name, n) for n in names)}
+            if len(found) > 1:
+                logger.warning("Payer %s matched multiple children %s, cannot auto-match receipt", payer_name, sorted(found))
+            res = [next(iter(found))] if len(found) == 1 else []
+        cache[payer_name] = res
+        return res
+    return match
+
+
 async def rematch_unlinked_receipts(db: AsyncSession) -> int:
     from app.models.models import EmailReceipt
 
     result = await db.execute(select(EmailReceipt))
     receipts = result.scalars().all()
+    match = await _payer_matcher(db)
     matched = 0
 
     for receipt in receipts:
-        changed = await _apply_payer_match(db, receipt)
-        if changed:
+        child_ids = match(receipt.payer_name)
+        new_child_id = child_ids[0] if len(child_ids) == 1 else None
+        if receipt.child_id != new_child_id:
+            receipt.child_id = new_child_id
             matched += 1
 
     if matched:

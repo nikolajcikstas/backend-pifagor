@@ -133,6 +133,9 @@ class ChildProfile(Base):
     qm_trial_call_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     # Контроль качества: причина отказа (вкладка «Отказы»)
     qm_refusal_reason: Mapped[Optional[str]] = mapped_column(Text)
+    # Реферальная ссылка pifagor.by/r/<код>: код выдаётся при статусе «Клиент»
+    ref_code: Mapped[Optional[str]] = mapped_column(String(12), unique=True, index=True)
+    ref_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime)  # «ссылка выслана»
 
     user: Mapped["User"] = relationship(back_populates="child_profile")
     parents: Mapped[List["ParentChild"]] = relationship(back_populates="child")
@@ -463,6 +466,14 @@ class LeadRequest(Base):
     message: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[RequestStatus] = mapped_column(Enum(RequestStatus), default=RequestStatus.new)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Реферальная заявка (страница pifagor.by/r/<код>)
+    ref_code: Mapped[Optional[str]] = mapped_column(String(12), index=True)
+    referrer_child_id: Mapped[Optional[int]] = mapped_column(ForeignKey("child_profiles.id", ondelete="SET NULL"), index=True)
+    # почему заявка не засчитана: test / duplicate / own / in_crm / excluded; пусто — засчитана
+    ref_flag: Mapped[Optional[str]] = mapped_column(String(20))
+    child_name: Mapped[Optional[str]] = mapped_column(String(200))
+    grade: Mapped[Optional[str]] = mapped_column(String(20))
+    phone_norm: Mapped[Optional[str]] = mapped_column(String(20), index=True)
 
     subject: Mapped[Optional["Subject"]] = relationship()
 
@@ -766,3 +777,31 @@ class AnalyticsArchive(Base):
     key: Mapped[str] = mapped_column(String(16), primary_key=True)
     data: Mapped[str] = mapped_column(Text, nullable=False)
     frozen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReferralLink(Base):
+    """Кто кого привёл: новый ученик (child_id) — по рекомендации referrer_child_id.
+    Создаётся автоматически (совпал телефон/имя с реферальной заявкой) или из
+    строки «Пригласил: Фамилия Имя» в комментарии ученика."""
+    __tablename__ = "referral_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), unique=True, index=True)
+    referrer_child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    lead_id: Mapped[Optional[int]] = mapped_column(ForeignKey("lead_requests.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="form")  # form | comment
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class StudentPriceHistory(Base):
+    """История цены занятия ученика: новая цена действует с даты, прошлые
+    занятия считаются по цене, действовавшей на их дату."""
+    __tablename__ = "student_price_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    discount_pct: Mapped[Optional[int]] = mapped_column(Integer)  # скидка за рекомендации (5/10), если это она
+    reason: Mapped[Optional[str]] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

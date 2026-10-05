@@ -212,6 +212,10 @@ async def list_lead_requests(
             "message": r.message,
             "status": r.status,
             "created_at": r.created_at,
+            "ref_code": r.ref_code,
+            "referrer_child_id": r.referrer_child_id,
+            "ref_counted": (r.ref_flag is None) if r.referrer_child_id else None,
+            "ref_flag": r.ref_flag,
         }
         for r in rows
     ]

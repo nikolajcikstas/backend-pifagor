@@ -458,10 +458,29 @@ async def update_admin_student(
     if not student or not student.child_profile:
         raise HTTPException(status_code=404, detail="Student not found")
 
+    def _names_state():
+        """ФИО ученика и родителя — по ним сопоставляются чеки об оплате."""
+        p = next((l.parent.user for l in student.child_profile.parents if l.parent and l.parent.user), None)
+        return (student.first_name, student.last_name,
+                (p.last_name, p.first_name, p.phone) if p else None)
+
+    names_before = _names_state()
+
     if payload.lesson_price is not None:
         if payload.lesson_price <= 0:
             raise HTTPException(status_code=400, detail="Lesson price must be greater than zero")
-        student.child_profile.lesson_price = payload.lesson_price
+        if payload.lesson_price != student.child_profile.lesson_price:
+            from app.models.models import StudentPriceHistory
+            from app.services.pricing import set_price_from, minsk_today
+            has_hist = (await db.execute(
+                select(StudentPriceHistory.id).where(StudentPriceHistory.child_id == student.child_profile.id).limit(1)
+            )).first() is not None
+            if has_hist:
+                # у ученика уже есть история цен — новая цена действует с сегодня,
+                # прошлые занятия остаются по прежней цене
+                await set_price_from(db, student.child_profile, payload.lesson_price, minsk_today(),
+                                     reason="Изменено в CRM")
+            student.child_profile.lesson_price = payload.lesson_price
     if payload.grade is not None:
         student.child_profile.grade = payload.grade
     if payload.first_name is not None:
@@ -541,15 +560,6 @@ async def update_admin_student(
                         )
                     )
 
-    should_rematch_receipts = any(
-        value is not None
-        for value in (
-            payload.first_name,
-            payload.last_name,
-            payload.parent_name,
-            payload.parent_phone,
-        )
-    )
 
     parent_user = None
     for link in student.child_profile.parents:
@@ -564,6 +574,15 @@ async def update_admin_student(
         if payload.parent_phone is not None:
             parent_user.phone = payload.parent_phone.strip() or None
 
+    # Чеки пересопоставляются, только если реально поменялись ФИО/телефон
+    # (форма CRM присылает все поля при каждом сохранении).
+    should_rematch_receipts = _names_state() != names_before
+    # Реферальные ссылки: «Пригласил: …» в комментарии или заявка с этим телефоном
+    from app.services.referrals import process_child_referral
+    referral_msg = await process_child_referral(
+        db, student.child_profile, student,
+        [l.parent.user for l in student.child_profile.parents if l.parent and l.parent.user],
+    )
     await db.commit()
     if should_rematch_receipts:
         from app.services.email_parser import rematch_unlinked_receipts
@@ -589,6 +608,8 @@ async def update_admin_student(
         ),
         "parent_name": f"{parent_user.last_name} {parent_user.first_name}".strip() if parent_user else "",
         "parent_phone": parent_user.phone if parent_user else "",
+        "referral_msg": referral_msg,
+        "ref_code": student.child_profile.ref_code,
     }
 
 
@@ -629,6 +650,13 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
                 lesson_subjects_map.setdefault(cid, set()).add(subject_name)
             if t_last is not None or t_first is not None:
                 lesson_tutors_map.setdefault(cid, set()).add(f"{t_last} {t_first}".strip())
+
+    # реферальные ссылки: коды для клиентов без кода, статистика и скидки
+    from app.services.referrals import ensure_codes, referral_stats
+    from app.services.pricing import discount_state, discount_offer
+    await ensure_codes(db)  # те же объекты в сессии — коды сразу видны в children
+    ref_stats = await referral_stats(db)
+    disc = await discount_state(db, child_ids)
 
     contract_rows = await db.execute(
         select(ParentContract.child_id, ParentContractChild.child_id)
@@ -681,6 +709,15 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "accounting_start_date": (
                 child.accounting_start_date.isoformat() if child.accounting_start_date else None
             ),
+            "ref_code": child.ref_code,
+            "ref_sent_at": child.ref_sent_at.isoformat() + "Z" if child.ref_sent_at else None,
+            "ref_leads": ref_stats.get(child.id, {}).get("leads", 0),
+            "ref_leads_total": ref_stats.get(child.id, {}).get("leads_total", 0),
+            "ref_clients": ref_stats.get(child.id, {}).get("clients", 0),
+            "discount_pct": disc.get(child.id, {}).get("applied", 0),
+            "discount_offer": discount_offer(
+                child.lesson_price, disc.get(child.id, {}).get("applied", 0), disc.get(child.id, {}).get("base"),
+                ref_stats.get(child.id, {}).get("leads", 0)),
         })
     return rows
 
@@ -1238,6 +1275,10 @@ async def list_admin_tutors(db: AsyncSession = Depends(get_db)):
     rows = []
     for t in tutors:
         _cur, pending, pending_from = await get_current_and_pending_rate(db, t.id, t.rate_per_hour)
+        if _cur is not None and t.rate_per_hour != _cur:
+            # запланированная ставка вступила в силу — обновляем поле в карточке
+            t.rate_per_hour = _cur
+            await db.commit()
         rows.append(_serialize_tutor(
             t, earnings=earnings_map.get(t.id, 0.0),
             pending_rate=pending, pending_rate_from=pending_from,
@@ -1340,9 +1381,19 @@ async def update_admin_tutor(
     data = payload.model_dump(exclude_unset=True)
 
     # Профильные поля репетитора
-    for field in ("bio", "education", "experience_years", "rate_per_hour", "is_published"):
+    for field in ("bio", "education", "experience_years", "is_published"):
         if field in data and data[field] is not None:
             setattr(tutor, field, data[field])
+    # Ставка: если у репетитора есть история ставок, ручная правка записывается
+    # в историю с сегодняшнего дня (иначе расчёт заработка её бы не увидел).
+    if data.get("rate_per_hour") is not None and data["rate_per_hour"] != tutor.rate_per_hour:
+        from app.services.tutor_earnings import set_tutor_rate_from, minsk_today
+        has_hist = (await db.execute(
+            select(TutorRateHistory.id).where(TutorRateHistory.tutor_id == tutor.id).limit(1)
+        )).first() is not None
+        if has_hist:
+            await set_tutor_rate_from(db, tutor, data["rate_per_hour"], minsk_today())
+        tutor.rate_per_hour = data["rate_per_hour"]
 
     # Поля связанного пользователя (имя, фамилия, аватар)
     user_data = data.get("user")

@@ -7,7 +7,7 @@
 занятия берётся та ставка, что действовала на дату этого занятия, а не
 текущая.
 """
-from datetime import date as DateType
+from datetime import date as DateType, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select
@@ -75,7 +75,7 @@ async def get_current_and_pending_rate(
     if not history:
         return fallback_rate, None, None
 
-    today = DateType.today()
+    today = minsk_today()
     current = None
     pending = None
     pending_from = None
@@ -90,3 +90,55 @@ async def get_current_and_pending_rate(
         current = history[0].rate_per_hour
 
     return current, pending, pending_from
+
+
+def minsk_today() -> DateType:
+    """Сегодня по Минску (сервер работает в UTC — после полуночи по Минску
+    ещё «вчера» по UTC, из-за этого запланированная ставка включалась позже)."""
+    return (datetime.utcnow() + timedelta(hours=3)).date()
+
+
+async def sync_tutor_rates(db: AsyncSession) -> int:
+    """Поле «ставка» у репетитора = ставка из истории, действующая сегодня.
+    Раньше поле обновлялось только в момент сохранения: запланированная на
+    01.10 ставка в этот день «исчезала» из запланированных, а в карточке
+    оставалась старая. Возвращает число исправленных репетиторов."""
+    rows = (await db.execute(
+        select(TutorRateHistory.tutor_id, TutorRateHistory.rate_per_hour, TutorRateHistory.effective_from)
+        .order_by(TutorRateHistory.tutor_id, TutorRateHistory.effective_from, TutorRateHistory.id)
+    )).all()
+    if not rows:
+        return 0
+    today = minsk_today()
+    current: dict[int, float] = {}
+    for tid, rate, eff in rows:
+        if tid not in current or eff <= today:
+            current[tid] = rate
+    fixed = 0
+    for tutor in (await db.execute(select(TutorProfile).where(TutorProfile.id.in_(list(current))))).scalars().all():
+        if tutor.rate_per_hour != current[tutor.id]:
+            tutor.rate_per_hour = current[tutor.id]
+            fixed += 1
+    if fixed:
+        await db.commit()
+    return fixed
+
+
+async def set_tutor_rate_from(db: AsyncSession, tutor: TutorProfile, rate: float, effective_from: DateType) -> None:
+    """Записать ставку в историю с даты (если на эту дату уже есть запись —
+    заменить). Если истории ещё нет — сначала фиксируется прежняя ставка
+    как действовавшая с первого занятия, чтобы прошлое не пересчиталось."""
+    hist = (await db.execute(
+        select(TutorRateHistory).where(TutorRateHistory.tutor_id == tutor.id)
+    )).scalars().all()
+    if not hist and tutor.rate_per_hour:
+        from sqlalchemy import func as _f
+        earliest = await db.scalar(select(_f.min(Lesson.date)).where(Lesson.tutor_id == tutor.id))
+        base_from = min(earliest or effective_from, effective_from - timedelta(days=1))
+        db.add(TutorRateHistory(tutor_id=tutor.id, rate_per_hour=tutor.rate_per_hour, effective_from=base_from))
+    same = next((h for h in hist if h.effective_from == effective_from), None)
+    if same:
+        same.rate_per_hour = rate
+    else:
+        db.add(TutorRateHistory(tutor_id=tutor.id, rate_per_hour=rate, effective_from=effective_from))
+    await db.flush()

@@ -629,3 +629,5 @@ class StudentFinanceRow(BaseModel):
     lessons_paid: int
     amount_paid: float
     lesson_price: float
+    cost_conducted: float = 0.0  # проведено занятий по ценам на их даты
+    debt: float = 0.0            # max(0, cost_conducted − amount_paid)

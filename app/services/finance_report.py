@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.models import ChildProfile, EmailReceipt, Lesson, LessonStatus, PayerChildLink
 from app.schemas.schemas import StudentFinanceRow
+from app.services.pricing import load_prices, minsk_today
 
 
 async def compute_finance_rows(
@@ -115,10 +116,7 @@ async def compute_finance_rows(
                 pooled_paid[norm] = pooled_paid.get(norm, 0.0) + r.amount
 
         group_child_ids = {cid for ids in groups.values() for cid in ids}
-        prices_res = await db.execute(
-            select(ChildProfile.id, ChildProfile.lesson_price).where(ChildProfile.id.in_(group_child_ids))
-        )
-        price_by_child = {row[0]: (row[1] or 40) for row in prices_res.all()}
+        gbook = await load_prices(db, group_child_ids)
 
         for group_key, child_ids_in_group in groups.items():
             combined = []
@@ -130,7 +128,7 @@ async def compute_finance_rows(
             remaining = pooled_paid.get(group_key, 0.0)
             paid_for_child: dict[int, float] = {cid: 0.0 for cid in child_ids_in_group}
             for _ldate, cid in combined:
-                price = price_by_child.get(cid, 40)
+                price = gbook.price(cid, _ldate)
                 if remaining + 1e-9 >= price:
                     paid_for_child[cid] += price
                     remaining -= price
@@ -153,6 +151,8 @@ async def compute_finance_rows(
         .where(ChildProfile.id.in_(all_child_ids))
     )
     children = {cp.id: cp for cp in cp_res.scalars().unique()}
+    book = await load_prices(db, all_child_ids)
+    today = minsk_today()
 
     rows: List[StudentFinanceRow] = []
     for child_id in sorted(all_child_ids):
@@ -162,8 +162,26 @@ async def compute_finance_rows(
         u = cp.user
         conducted = lessons_by_child.get(child_id, 0)
         amount_paid = amounts_by_child.get(child_id, 0.0) or 0.0
-        lesson_price = cp.lesson_price or 40
-        lessons_paid = int(amount_paid // lesson_price) if lesson_price else 0
+        if book.has_history(child_id):
+            # цена менялась с даты — каждое занятие по цене на его дату
+            lesson_price = book.price(child_id, today)
+            dates = sorted(lesson_dates_by_child.get(child_id, []))
+            cost = sum(book.price(child_id, d) for d in dates)
+            remaining, lessons_paid = amount_paid, 0
+            for d in dates:
+                p = book.price(child_id, d)
+                if remaining + 1e-9 >= p:
+                    remaining -= p
+                    lessons_paid += 1
+                else:
+                    remaining = -1
+                    break
+            if remaining >= 0 and lesson_price:
+                lessons_paid += int((remaining + 1e-9) // lesson_price)
+        else:
+            lesson_price = cp.lesson_price or 40
+            cost = conducted * lesson_price
+            lessons_paid = int(amount_paid // lesson_price) if lesson_price else 0
 
         rows.append(StudentFinanceRow(
             child_id=child_id,
@@ -172,6 +190,8 @@ async def compute_finance_rows(
             lessons_paid=lessons_paid,
             amount_paid=round(amount_paid, 2),
             lesson_price=round(lesson_price, 2),
+            cost_conducted=round(cost, 2),
+            debt=round(max(0.0, cost - amount_paid), 2),
         ))
 
     return rows

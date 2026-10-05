@@ -44,7 +44,8 @@ INACTIVE_DAYS = 7
 REFRESH_WEEKDAYS = (1, 5)  # вторник, суббота
 REFRESH_HOUR = 8
 
-_lock = asyncio.Lock()
+_lock = asyncio.Lock()          # задачи контроля качества
+_alock = asyncio.Lock()         # тяжёлые задачи аналитики — отдельно, чтобы не тормозить страницы КК
 _failed_at: dict[str, datetime] = {}  # задача упала — повторяем не чаще раза в 10 минут
 
 
@@ -261,21 +262,46 @@ async def refresh_regularity(db: AsyncSession) -> int:
     return added
 
 
-async def nightly_regularity(db: AsyncSession) -> None:
-    """Каждую ночь: занятие проведено — запись удаляется (даже закрытая);
-    назначенная дата прошла, а занятия не было — строка красная и снова «В работе»."""
+async def sync_regularity(db: AsyncSession, rows: Optional[list] = None, reopen: bool = False) -> list:
+    """Сверка с расписанием (каждую ночь):
+    после последнего занятия появилось новое «Проведено» — запись удаляется
+    (даже закрытая); назначенная дата прошла, а занятия не было — строка
+    красная, а ночью (reopen) закрытая запись снова становится «В работе».
+    Возвращает оставшиеся записи."""
     today = _now_minsk().date()
-    last = await _last_completed(db)
-    rows = (await db.execute(select(QmRegularity))).scalars().all()
+    if rows is None:
+        rows = list((await db.execute(select(QmRegularity))).scalars().all())
+    if not rows:
+        return []
+    ids = list({r.child_id for r in rows})
+    last = {cid: d for cid, d in (await db.execute(
+        select(Lesson.child_id, func.max(Lesson.date))
+        .where(Lesson.status == LessonStatus.completed, Lesson.child_id.in_(ids))
+        .group_by(Lesson.child_id)
+    )).all()}
+    keep, changed = [], False
     for r in rows:
         last_date = last.get(r.child_id)
-        resumed = last_date is not None and (r.last_lesson_date is None or last_date > r.last_lesson_date)
-        if resumed:
+        if last_date is not None and (r.last_lesson_date is None or last_date > r.last_lesson_date):
             await db.delete(r)
+            changed = True
             continue
-        r.overdue = bool(r.next_lesson_date and r.next_lesson_date < today)
-        if r.overdue and r.status == "closed":
-            r.status, r.closed_at = "in_work", None
+        if r.next_lesson_date and r.next_lesson_date.year < 2020:
+            # мусорная дата из-за старого поля ввода (год «0002» при наборе с клавиатуры)
+            r.next_lesson_date, changed = None, True
+        overdue = bool(r.next_lesson_date and r.next_lesson_date < today)
+        if overdue != bool(r.overdue):
+            r.overdue, changed = overdue, True
+        if reopen and overdue and r.status == "closed":
+            r.status, r.closed_at, changed = "in_work", None, True
+        keep.append(r)
+    if changed:
+        await db.commit()
+    return keep
+
+
+async def nightly_regularity(db: AsyncSession) -> None:
+    await sync_regularity(db, reopen=True)
 
 
 JOBS = {
@@ -284,15 +310,37 @@ JOBS = {
     "regularity_nightly": _last_nightly_slot,
     "analytics_snapshot": _last_nightly_slot,  # число клиентов на день — для аналитики
     "analytics_archive": _last_nightly_slot,   # закрепить итоги прошедших периодов (через 14 дней)
+    "prices_sync": _last_nightly_slot,         # вступившие в силу ставки репетиторов и цены учеников
 }
 
 
-async def run_due_jobs(db: AsyncSession, force: bool = False) -> None:
-    """Выполняет пропущенные плановые обновления (или все сразу при force)."""
-    async with _lock:
+QM_JOBS = ("calls_refresh", "regularity_refresh", "regularity_nightly")
+ANALYTICS_JOBS = ("analytics_snapshot", "analytics_archive", "prices_sync")
+
+
+def _is_due(name: str, job, now: datetime, force: bool) -> bool:
+    if force:
+        return True
+    if job and job.last_run and job.last_run >= _to_utc_naive(JOBS[name](now)):
+        return False
+    failed = _failed_at.get(name)
+    return not (failed and datetime.utcnow() - failed < timedelta(minutes=10))
+
+
+async def run_due_jobs(db: AsyncSession, force: bool = False, names: tuple = QM_JOBS) -> None:
+    """Выполняет пропущенные плановые обновления (или все сразу при force).
+    Страницы контроля качества вызывают только задачи КК: если ничего не
+    пора делать — это один быстрый запрос без ожидания блокировки."""
+    now = _now_minsk()
+    jobs = {j.name: j for j in (await db.execute(select(QmJob).where(QmJob.name.in_(names)))).scalars().all()}
+    if not any(_is_due(n, jobs.get(n), now, force) for n in names):
+        return
+    async with (_alock if names == ANALYTICS_JOBS else _lock):
         now = _now_minsk()
         jobs = {j.name: j for j in (await db.execute(select(QmJob))).scalars().all()}
         for name, slot_fn in JOBS.items():
+            if name not in names:
+                continue
             job = jobs.get(name)
             due_since = _to_utc_naive(slot_fn(now))
             if not force and job and job.last_run and job.last_run >= due_since:
@@ -310,6 +358,11 @@ async def run_due_jobs(db: AsyncSession, force: bool = False) -> None:
                 elif name == "analytics_snapshot":
                     from app.api.v1.endpoints.analytics import save_today_snapshot
                     await save_today_snapshot(db)
+                elif name == "prices_sync":
+                    from app.services.tutor_earnings import sync_tutor_rates
+                    from app.services.pricing import sync_current_prices
+                    await sync_tutor_rates(db)
+                    await sync_current_prices(db)
                 elif name == "analytics_archive":
                     from app.api.v1.endpoints.analytics import freeze_settled
                     n = await freeze_settled(db)
@@ -339,6 +392,7 @@ async def qm_scheduler_task() -> None:
         try:
             async with async_session_maker() as db:
                 await run_due_jobs(db)
+                await run_due_jobs(db, names=ANALYTICS_JOBS)
         except Exception:
             logger.exception("QM scheduler iteration failed")
         await asyncio.sleep(600)
@@ -661,15 +715,15 @@ def _reg_dict(r: QmRegularity, tutors: dict, contacts: dict) -> dict:
 async def list_regularity(show_closed: bool = Query(False), db: AsyncSession = Depends(get_db)):
     await run_due_jobs(db)
     # Закрытые строки тоже показываются: запись остаётся, пока система не увидит
-    # проведённое занятие (тогда удалит её сама)
+    # проведённое занятие — сверка с расписанием каждую ночь (sync_regularity)
     q = select(QmRegularity).options(joinedload(QmRegularity.child).joinedload(ChildProfile.user))
-    rows = (await db.execute(q)).scalars().unique().all()
+    rows = list((await db.execute(q)).scalars().unique().all())
     ids = list({r.child_id for r in rows})
     tutors = await _tutors(db, ids)
     contacts = await _contacts(db, ids)
     items = [_reg_dict(r, tutors, contacts) for r in rows]
     items.sort(key=lambda x: (not x["overdue"], x["status"] == "closed", x["last_lesson_date"] or "0000"))
-    closed_count = await db.scalar(select(func.count(QmRegularity.id)).where(QmRegularity.status == "closed"))
+    closed_count = sum(1 for r in rows if r.status == "closed")
     return {"items": items, "closed_count": closed_count or 0, "jobs": await _job_times(db), **_meta()}
 
 
@@ -689,6 +743,8 @@ async def update_regularity(row_id: int, body: RegUpdate, db: AsyncSession = Dep
         r.next_lesson_date = None
         r.overdue = False
     elif body.next_lesson_date is not None:
+        if not (2020 <= body.next_lesson_date.year <= 2100):
+            raise HTTPException(status_code=400, detail="Проверьте дату следующего занятия")
         r.next_lesson_date = body.next_lesson_date
         r.overdue = body.next_lesson_date < today
     if body.status is not None:
