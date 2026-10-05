@@ -203,18 +203,63 @@ async def _schema_retry_task() -> None:
 
 async def _init_database_schema() -> bool:
     """Best-effort schema bootstrap. Never crash the process on transient DB issues.
+    Каждый оператор выполняется в своей короткой транзакции: если один зависнет
+    или упадёт, всё уже сделанное сохраняется, а не откатывается целиком.
     Возвращает True, если всё применилось без ошибок."""
-    logger.info("Starting database schema initialization")
+    import time as _time
+    logger.warning("SCHEMA initialization started")
     failures = 0
+    lock_fails = 0
+
+    async def run(label: str, sql: str, params: "dict | None" = None) -> bool:
+        nonlocal failures, lock_fails
+        t0 = _time.monotonic()
+        try:
+            async with asyncio.timeout(40):
+                async with engine.begin() as conn:
+                    # не ждать блокировку бесконечно: при деплое старая копия
+                    # сервера может держать таблицу — тогда повторим позже
+                    await conn.execute(text("SET LOCAL lock_timeout = '8s'"))
+                    await conn.execute(text("SET LOCAL statement_timeout = '30s'"))
+                    await conn.execute(text(sql), params or {})
+            dt = _time.monotonic() - t0
+            if dt > 2:
+                logger.warning("SCHEMA slow statement (%.1fs): %s", dt, label[:120])
+            return True
+        except Exception as e:
+            failures += 1
+            if "lock timeout" in str(e).lower():
+                lock_fails += 1
+            logger.warning("SCHEMA statement failed after %.1fs: %s | %s: %s",
+                           _time.monotonic() - t0, label[:120], type(e).__name__, str(e)[:200])
+            return False
+
     try:
-        async with asyncio.timeout(120):
+        t0 = _time.monotonic()
+        async with asyncio.timeout(60):
             async with engine.begin() as conn:
-                # не ждать блокировку таблицы бесконечно: при деплое старая копия
-                # сервера может её держать — тогда повторим позже, а не зависнем
                 await conn.execute(text("SET LOCAL lock_timeout = '8s'"))
                 await conn.run_sync(Base.metadata.create_all)
+        logger.warning("SCHEMA create_all done in %.1fs", _time.monotonic() - t0)
+    except Exception as e:
+        failures += 1
+        logger.warning("SCHEMA create_all failed: %s: %s", type(e).__name__, str(e)[:200])
 
-                for sql in (
+    for sql in (
+                    # реферальные ссылки и история цен учеников
+                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS ref_code VARCHAR(12)",
+                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS ref_sent_at TIMESTAMP",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_child_profiles_ref_code ON child_profiles (ref_code)",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS ref_code VARCHAR(12)",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS referrer_child_id INTEGER REFERENCES child_profiles(id) ON DELETE SET NULL",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS ref_flag VARCHAR(20)",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS child_name VARCHAR(200)",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS grade VARCHAR(20)",
+                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS phone_norm VARCHAR(20)",
+                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_ref_code ON lead_requests (ref_code)",
+                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_referrer_child_id ON lead_requests (referrer_child_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_phone_norm ON lead_requests (phone_norm)",
+
                     "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'lessonstatus') THEN ALTER TYPE lessonstatus ADD VALUE IF NOT EXISTS 'trial'; END IF; END $$",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS lesson_price DOUBLE PRECISION NOT NULL DEFAULT 40",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS crm_status VARCHAR(50) NOT NULL DEFAULT 'Пробное'",
@@ -257,19 +302,6 @@ async def _init_database_schema() -> bool:
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_qm_calls_open ON qm_calls (child_id) WHERE status = 'new'",
                     "CREATE INDEX IF NOT EXISTS ix_qm_calls_status_closed ON qm_calls (status, closed_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_date_status ON lessons (date, status)",
-                    # реферальные ссылки и история цен учеников
-                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS ref_code VARCHAR(12)",
-                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS ref_sent_at TIMESTAMP",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_child_profiles_ref_code ON child_profiles (ref_code)",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS ref_code VARCHAR(12)",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS referrer_child_id INTEGER REFERENCES child_profiles(id) ON DELETE SET NULL",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS ref_flag VARCHAR(20)",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS child_name VARCHAR(200)",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS grade VARCHAR(20)",
-                    "ALTER TABLE lead_requests ADD COLUMN IF NOT EXISTS phone_norm VARCHAR(20)",
-                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_ref_code ON lead_requests (ref_code)",
-                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_referrer_child_id ON lead_requests (referrer_child_id)",
-                    "CREATE INDEX IF NOT EXISTS ix_lead_requests_phone_norm ON lead_requests (phone_norm)",
                     "UPDATE child_profiles SET crm_status = 'Пробное' WHERE crm_status LIKE 'Р%' OR crm_status IS NULL",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_tutor_id ON lessons (tutor_id)",
                     "CREATE INDEX IF NOT EXISTS ix_lessons_child_id ON lessons (child_id)",
@@ -318,75 +350,53 @@ async def _init_database_schema() -> bool:
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_data BYTEA",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_mime VARCHAR(150)",
                     "ALTER TABLE parent_contracts ADD COLUMN IF NOT EXISTS file_name VARCHAR(255)",
-                ):
-                    # Каждый оператор — в своей точке сохранения: если один упадёт,
-                    # остальные (и create_all) всё равно применятся, а не откатятся вместе.
-                    try:
-                        async with conn.begin_nested():
-                            await conn.execute(text(sql))
-                    except Exception as e:
-                        failures += 1
-                        if "lock timeout" in str(e).lower() or "LockNotAvailable" in type(getattr(e, "orig", e)).__name__:
-                            logger.warning("SCHEMA: table is locked by another connection, will retry later: %s", sql[:120])
-                            break
-                        logger.exception("Schema statement failed (continuing): %s", sql[:120])
+    ):
+        await run(sql, sql)
+        if lock_fails >= 2:
+            logger.warning("SCHEMA: tables are busy (another server copy is still running) — will retry shortly")
+            break
 
-                for name, slug in (
-                    ("Математика", "matematika"),
-                    ("Физика", "fizika"),
-                    ("Английский язык", "angliyskiy"),
-                    ("Русский язык", "russkiy"),
-                    ("Белорусский язык", "belorusskiy"),
-                    ("Биология", "biologiya"),
-                    ("Химия", "himiya"),
-                ):
-                    try:
-                        async with conn.begin_nested():
-                            await conn.execute(
-                                text(
-                                    "INSERT INTO subjects (name, slug, is_active) "
-                                    "VALUES (:name, :slug, TRUE) "
-                                    "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, is_active = TRUE"
-                                ),
-                                {"name": name, "slug": slug},
-                            )
-                    except Exception:
-                        failures += 1
-                        logger.exception("Subject seed failed for %s", slug)
+    for name, slug in (
+        ("Математика", "matematika"),
+        ("Физика", "fizika"),
+        ("Английский язык", "angliyskiy"),
+        ("Русский язык", "russkiy"),
+        ("Белорусский язык", "belorusskiy"),
+        ("Биология", "biologiya"),
+        ("Химия", "himiya"),
+    ):
+        await run(f"subject {slug}",
+                  "INSERT INTO subjects (name, slug, is_active) VALUES (:name, :slug, TRUE) "
+                  "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, is_active = TRUE",
+                  {"name": name, "slug": slug})
 
-                # Разовые правки данных: каждая выполняется ровно один раз
-                # (отметка о выполнении хранится в таблице app_data_migrations).
-                try:
-                    async with conn.begin_nested():
-                        await conn.execute(text(
-                            "CREATE TABLE IF NOT EXISTS app_data_migrations ("
-                            "name VARCHAR(100) PRIMARY KEY, applied_at TIMESTAMP DEFAULT now())"
-                        ))
-                        first_time = (await conn.execute(text(
-                            "INSERT INTO app_data_migrations (name) VALUES ('reports_back_to_review_2026_09') "
-                            "ON CONFLICT (name) DO NOTHING RETURNING name"
-                        ))).first()
-                        if first_time:
-                            # Все уже отправленные отчёты возвращаются на проверку администратору:
-                            # у родителей они скрываются до повторной отправки.
-                            res = await conn.execute(text(
-                                "UPDATE reports SET status = 'submitted', approved_at = NULL "
-                                "WHERE status = 'approved' AND COALESCE(TRIM(content), '') <> ''"
-                            ))
-                            logger.info("Reports returned to review: %s", res.rowcount)
-                except Exception:
-                    failures += 1
-                    logger.exception("One-time data migration failed (continuing)")
-
-        logger.warning("SCHEMA initialization finished (failures: %s)", failures)
-        return failures == 0
+    # Разовые правки данных: каждая выполняется ровно один раз
+    # (отметка о выполнении хранится в таблице app_data_migrations).
+    try:
+        async with asyncio.timeout(40):
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS app_data_migrations ("
+                    "name VARCHAR(100) PRIMARY KEY, applied_at TIMESTAMP DEFAULT now())"
+                ))
+                first_time = (await conn.execute(text(
+                    "INSERT INTO app_data_migrations (name) VALUES ('reports_back_to_review_2026_09') "
+                    "ON CONFLICT (name) DO NOTHING RETURNING name"
+                ))).first()
+                if first_time:
+                    # Все уже отправленные отчёты возвращаются на проверку администратору:
+                    # у родителей они скрываются до повторной отправки.
+                    res = await conn.execute(text(
+                        "UPDATE reports SET status = 'submitted', approved_at = NULL "
+                        "WHERE status = 'approved' AND COALESCE(TRIM(content), '') <> ''"
+                    ))
+                    logger.info("Reports returned to review: %s", res.rowcount)
     except Exception as e:
-        # Render free tier / cold DB can time out; keep the web process alive.
-        logger.exception(
-            "Database schema initialization failed; service will keep running and retry via requests"
-        )
-        logger.warning("SCHEMA INIT FAILED: %s: %s", type(e).__name__, str(e)[:300])
-        return False
+        failures += 1
+        logger.warning("SCHEMA one-time data migration failed: %s: %s", type(e).__name__, str(e)[:200])
+
+    logger.warning("SCHEMA initialization finished (failures: %s)", failures)
+    return failures == 0
 
 
 @asynccontextmanager
