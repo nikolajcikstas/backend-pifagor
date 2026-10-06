@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import ChildProfile, CrmStatusEvent, LeadRequest, ParentChild, ReferralLink, RoleEnum, StudentPriceHistory, Subject, User
+from app.models.models import ChildProfile, CrmStatusEvent, LeadRequest, ParentChild, ParentProfile, ReferralLink, RoleEnum, StudentPriceHistory, Subject, User
 from app.services import referrals as R
 from app.services.pricing import BASE_PRICE, discount_offer, discount_state, minsk_today, set_price_from
 
@@ -32,6 +32,22 @@ async def _name(db: AsyncSession, child_id: int) -> str:
     return R.person_name(u)
 
 
+async def _parent_name(db: AsyncSession, child_id: int) -> str:
+    """Имя родителя ученика (приглашают обычно родители); если родителя нет — пусто."""
+    rows = (await db.execute(
+        select(User.last_name, User.first_name)
+        .join(ParentProfile, ParentProfile.user_id == User.id)
+        .join(ParentChild, ParentChild.parent_id == ParentProfile.id)
+        .where(ParentChild.child_id == child_id)
+        .order_by(ParentChild.id)
+    )).all()
+    for ln, fn in rows:
+        name = f"{(ln or '').strip()} {(fn or '').strip()}".strip()
+        if name:
+            return name
+    return ""
+
+
 # ─── публичная страница ───────────────────────────────────────────────────────
 
 @router.get("/ref/{code}")
@@ -40,7 +56,7 @@ async def ref_info(code: str, db: AsyncSession = Depends(get_db)):
     if not child:
         raise HTTPException(status_code=404, detail="Ссылка не найдена")
     subjects = (await db.execute(select(Subject.id, Subject.name).where(Subject.is_active == True).order_by(Subject.name))).all()
-    return {"code": child.ref_code, "referrer_name": await _name(db, child.id),
+    return {"code": child.ref_code, "referrer_name": await _parent_name(db, child.id) or await _name(db, child.id),
             "subjects": [{"id": i, "name": n} for i, n in subjects]}
 
 
@@ -70,11 +86,13 @@ async def ref_lead(code: str, body: RefLeadIn, db: AsyncSession = Depends(get_db
     if not phone_n or len(phone) > 30:
         raise HTTPException(status_code=400, detail="Укажите телефон полностью, например +375 29 123-45-67")
     referrer = await _name(db, child.id)
+    referrer_parent = await _parent_name(db, child.id)
     flag = await R.lead_flag(db, child.id, phone_n, body.staff)
     subject_name = ""
     if body.subject_id:
         subject_name = await db.scalar(select(Subject.name).where(Subject.id == body.subject_id)) or ""
-    parts = [f"По рекомендации: {referrer} (код {child.ref_code})"]
+    parts = [f"По рекомендации: {referrer_parent}, родитель ученика {referrer} (код {child.ref_code})" if referrer_parent
+             else f"По рекомендации: {referrer} (код {child.ref_code})"]
     if body.child_name and body.child_name.strip():
         parts.append(f"Ребёнок: {body.child_name.strip()[:200]}")
     if body.grade and body.grade.strip():
