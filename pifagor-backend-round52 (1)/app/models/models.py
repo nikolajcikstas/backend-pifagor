@@ -1,0 +1,825 @@
+import enum
+from datetime import date, datetime, time
+from typing import List, Optional
+
+from sqlalchemy import (
+    Boolean, Date, DateTime, Enum, ForeignKey,
+    Index, Integer, String, Text, Time, Float, LargeBinary, UniqueConstraint, func
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.session import Base
+
+
+# ─── Enums ────────────────────────────────────────────────────────────────────
+
+class RoleEnum(str, enum.Enum):
+    admin = "admin"
+    tutor = "tutor"
+    parent = "parent"
+    child = "child"
+
+
+class LessonStatus(str, enum.Enum):
+    scheduled = "scheduled"
+    trial = "trial"
+    completed = "completed"
+    cancelled = "cancelled"
+    rescheduled = "rescheduled"
+
+
+class RequestStatus(str, enum.Enum):
+    new = "new"
+    processed = "processed"
+    rejected = "rejected"
+
+
+# ─── Users & Auth ─────────────────────────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[RoleEnum] = mapped_column(Enum(RoleEnum), nullable=False)
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    middle_name: Mapped[Optional[str]] = mapped_column(String(100))
+    phone: Mapped[Optional[str]] = mapped_column(String(30))
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relations
+    tutor_profile: Mapped[Optional["TutorProfile"]] = relationship(back_populates="user", uselist=False)
+    parent_profile: Mapped[Optional["ParentProfile"]] = relationship(back_populates="user", uselist=False)
+    child_profile: Mapped[Optional["ChildProfile"]] = relationship(back_populates="user", uselist=False)
+    notifications: Mapped[List["Notification"]] = relationship(back_populates="user")
+
+    @property
+    def full_name(self) -> str:
+        parts = [self.last_name, self.first_name]
+        if self.middle_name:
+            parts.append(self.middle_name)
+        return " ".join(parts)
+
+
+# ─── Profiles ─────────────────────────────────────────────────────────────────
+
+class TutorProfile(Base):
+    __tablename__ = "tutor_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
+    bio: Mapped[Optional[str]] = mapped_column(Text)
+    education: Mapped[Optional[str]] = mapped_column(Text)
+    experience_years: Mapped[Optional[int]] = mapped_column(Integer)
+    rate_per_hour: Mapped[Optional[float]] = mapped_column(Float)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    user: Mapped["User"] = relationship(back_populates="tutor_profile")
+    subjects: Mapped[List["TutorSubject"]] = relationship(back_populates="tutor")
+    lessons: Mapped[List["Lesson"]] = relationship(back_populates="tutor")
+    contracts: Mapped[List["TutorContract"]] = relationship(back_populates="tutor")
+    reports: Mapped[List["Report"]] = relationship(back_populates="tutor")
+    payouts: Mapped[List["TutorPayout"]] = relationship(back_populates="tutor")
+    rate_history: Mapped[List["TutorRateHistory"]] = relationship(back_populates="tutor")
+
+
+class TutorRateHistory(Base):
+    """История ставок репетитора. Позволяет менять ставку с конкретной даты,
+    не пересчитывая задним числом уже проведённые занятия по новой ставке."""
+    __tablename__ = "tutor_rate_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    rate_per_hour: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="rate_history")
+
+
+class ParentProfile(Base):
+    __tablename__ = "parent_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
+
+    user: Mapped["User"] = relationship(back_populates="parent_profile")
+    children: Mapped[List["ParentChild"]] = relationship(back_populates="parent")
+    payments: Mapped[List["Payment"]] = relationship(back_populates="parent")
+    contracts: Mapped[List["ParentContract"]] = relationship(back_populates="parent")
+    comments: Mapped[List["Comment"]] = relationship(back_populates="parent")
+
+
+class ChildProfile(Base):
+    __tablename__ = "child_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
+    grade: Mapped[Optional[int]] = mapped_column(Integer)
+    lesson_price: Mapped[float] = mapped_column(Float, default=40, server_default="40", nullable=False)
+    crm_status: Mapped[str] = mapped_column(String(50), default="Пробное", server_default="Пробное", nullable=False)
+    lessons_per_week: Mapped[Optional[int]] = mapped_column(Integer)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    channel: Mapped[Optional[str]] = mapped_column(String(100))
+    subjects_text: Mapped[Optional[str]] = mapped_column(Text)
+    tutors_text: Mapped[Optional[str]] = mapped_column(Text)
+    contract_label: Mapped[Optional[str]] = mapped_column(String(100))
+    accounting_start_date: Mapped[Optional[date]] = mapped_column(Date)
+    # Контроль качества: звонок «2 недели после пробного» уже поставлен (или не нужен)
+    qm_trial_call_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # Контроль качества: причина отказа (вкладка «Отказы»)
+    qm_refusal_reason: Mapped[Optional[str]] = mapped_column(Text)
+    # Реферальная ссылка pifagor.by/r/<код>: код выдаётся при статусе «Клиент»
+    ref_code: Mapped[Optional[str]] = mapped_column(String(12), unique=True, index=True)
+    ref_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime)  # «ссылка выслана»
+
+    user: Mapped["User"] = relationship(back_populates="child_profile")
+    parents: Mapped[List["ParentChild"]] = relationship(back_populates="child")
+    lessons: Mapped[List["Lesson"]] = relationship(back_populates="child")
+    homeworks: Mapped[List["Homework"]] = relationship(back_populates="child")
+    materials: Mapped[List["Material"]] = relationship(back_populates="child")
+
+
+class ParentChild(Base):
+    """Many-to-many: parent ↔ child"""
+    __tablename__ = "parent_children"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_profiles.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+
+    parent: Mapped["ParentProfile"] = relationship(back_populates="children")
+    child: Mapped["ChildProfile"] = relationship(back_populates="parents")
+
+
+# ─── Subjects ─────────────────────────────────────────────────────────────────
+
+class Subject(Base):
+    __tablename__ = "subjects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    icon: Mapped[Optional[str]] = mapped_column(String(100))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    tutors: Mapped[List["TutorSubject"]] = relationship(back_populates="subject")
+    prices: Mapped[List["Price"]] = relationship(back_populates="subject")
+
+
+class TutorSubject(Base):
+    __tablename__ = "tutor_subjects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="subjects")
+    subject: Mapped["Subject"] = relationship(back_populates="tutors")
+
+
+# ─── Lessons / Schedule ───────────────────────────────────────────────────────
+
+class Lesson(Base):
+    __tablename__ = "lessons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"), index=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"), index=True)
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"), index=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    time_start: Mapped[time] = mapped_column(Time, nullable=False)
+    time_end: Mapped[time] = mapped_column(Time, nullable=False)
+    status: Mapped[LessonStatus] = mapped_column(Enum(LessonStatus), default=LessonStatus.scheduled, index=True)
+    cancel_reason: Mapped[Optional[str]] = mapped_column(Text)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    is_free_trial: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="lessons")
+    child: Mapped["ChildProfile"] = relationship(back_populates="lessons")
+    subject: Mapped["Subject"] = relationship()
+    homeworks: Mapped[List["Homework"]] = relationship(back_populates="lesson")
+
+
+# ─── Reports ──────────────────────────────────────────────────────────────────
+
+class Report(Base):
+    """Tutor uploads a report every 5 lessons"""
+    __tablename__ = "reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
+    lesson_id: Mapped[Optional[int]] = mapped_column(ForeignKey("lessons.id"))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    lesson_count: Mapped[int] = mapped_column(Integer, default=5)
+    file_url: Mapped[Optional[str]] = mapped_column(String(500))
+    material_score: Mapped[Optional[int]] = mapped_column(Integer)
+    material_comment: Mapped[Optional[str]] = mapped_column(Text)
+    successes: Mapped[Optional[str]] = mapped_column(Text)
+    difficulties: Mapped[Optional[str]] = mapped_column(Text)
+    homework_status: Mapped[Optional[str]] = mapped_column(String(120))
+    homework_comment: Mapped[Optional[str]] = mapped_column(Text)
+    engagement_score: Mapped[Optional[int]] = mapped_column(Integer)
+    # pending — занятие требует отчёта, репетитор отложил заполнение;
+    # submitted — заполнен и ждёт проверки админом; approved — одобрен и виден родителю.
+    # Старые отчёты (до появления проверки) уже были видны родителям — для них 'approved'.
+    status: Mapped[str] = mapped_column(String(20), default="submitted", server_default="approved", nullable=False)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Средняя оценка за ДЗ за период отчёта (10-балльная); если ДЗ не было — None
+    hw_avg_grade: Mapped[Optional[float]] = mapped_column(Float)
+    hw_count: Mapped[Optional[int]] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="reports")
+    child: Mapped["ChildProfile"] = relationship()
+    subject: Mapped["Subject"] = relationship()
+    lesson: Mapped[Optional["Lesson"]] = relationship()
+
+
+class TutorDocument(Base):
+    """Документ, отправленный админом конкретному репетитору (PDF и т.п.)."""
+    __tablename__ = "tutor_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship()
+
+
+# ─── Homework / Materials ─────────────────────────────────────────────────────
+
+class Homework(Base):
+    __tablename__ = "homeworks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lesson_id: Mapped[int] = mapped_column(ForeignKey("lessons.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    file_url: Mapped[Optional[str]] = mapped_column(String(500))           # tutor uploads
+    submission_url: Mapped[Optional[str]] = mapped_column(String(500))     # child submits
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Несколько файлов задания и ответа — JSON-список [{"url","name","mime"}]
+    task_files: Mapped[Optional[str]] = mapped_column(Text)
+    submission_files: Mapped[Optional[str]] = mapped_column(Text)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Оценка репетитора по 10-балльной шкале
+    grade: Mapped[Optional[int]] = mapped_column(Integer)
+    tutor_comment: Mapped[Optional[str]] = mapped_column(Text)
+    checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    lesson: Mapped["Lesson"] = relationship(back_populates="homeworks")
+    child: Mapped["ChildProfile"] = relationship(back_populates="homeworks")
+
+
+class StoredFile(Base):
+    """Файлы кабинета (ДЗ, ответы учеников) хранятся в базе: диск сервера на
+    Render очищается при каждом перезапуске, и файлы из /uploads пропадали."""
+    __tablename__ = "stored_files"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime: Mapped[str] = mapped_column(String(150), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Material(Base):
+    __tablename__ = "materials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    child: Mapped["ChildProfile"] = relationship(back_populates="materials")
+    subject: Mapped["Subject"] = relationship()
+
+
+# ─── Contracts ────────────────────────────────────────────────────────────────
+
+class TutorContract(Base):
+    """Договор подряда с репетитором"""
+    __tablename__ = "tutor_contracts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    signed_file_url: Mapped[Optional[str]] = mapped_column(String(500))
+    signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="contracts")
+
+
+class ParentContract(Base):
+    """Договор с родителем"""
+    __tablename__ = "parent_contracts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[Optional[int]] = mapped_column(ForeignKey("parent_profiles.id"), nullable=True)
+    child_id: Mapped[Optional[int]] = mapped_column(ForeignKey("child_profiles.id"), nullable=True)
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    signed_file_url: Mapped[Optional[str]] = mapped_column(String(500))
+    is_signed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Само содержимое файла договора хранится в БД (не на диске сервера —
+    # диск Render эфемерный и очищается при каждом деплое, из-за чего файлы
+    # переставали открываться). Отдаётся родителю через /parent/contract/{id}/file.
+    file_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    file_mime: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # ── Распознанные из текста договора данные ──
+    contract_number: Mapped[Optional[str]] = mapped_column(String(50))
+    client_name_raw: Mapped[Optional[str]] = mapped_column(String(300))
+    start_date: Mapped[Optional[date]] = mapped_column(Date)
+    end_date: Mapped[Optional[date]] = mapped_column(Date)
+    total_amount: Mapped[Optional[float]] = mapped_column(Float)
+    parent_full_name: Mapped[Optional[str]] = mapped_column(String(300))
+    parent_phone: Mapped[Optional[str]] = mapped_column(String(50))
+    parent_email: Mapped[Optional[str]] = mapped_column(String(200))
+    city: Mapped[Optional[str]] = mapped_column(String(200))
+    street: Mapped[Optional[str]] = mapped_column(String(200))
+    house: Mapped[Optional[str]] = mapped_column(String(50))
+    payments_json: Mapped[Optional[str]] = mapped_column(Text)
+    match_status: Mapped[str] = mapped_column(String(20), default="unmatched", server_default="unmatched")
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    recommendation: Mapped[Optional[str]] = mapped_column(Text)
+    recommendation_as_of: Mapped[Optional[date]] = mapped_column(Date)
+    payment_mode: Mapped[str] = mapped_column(String(20), default="unknown", server_default="unknown")
+
+    parent: Mapped[Optional["ParentProfile"]] = relationship(back_populates="contracts")
+    child: Mapped[Optional["ChildProfile"]] = relationship()
+    extra_children: Mapped[List["ParentContractChild"]] = relationship(back_populates="contract")
+
+
+class ParentContractChild(Base):
+    """Явная привязка договора сразу к нескольким ученикам (брат/сестра
+    и т.п., один договор на обоих). ParentContract.child_id по-прежнему
+    хранит "основного" ученика для обратной совместимости, а здесь —
+    полный список всех привязанных."""
+    __tablename__ = "parent_contract_children"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("parent_contracts.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+
+    contract: Mapped["ParentContract"] = relationship(back_populates="extra_children")
+    child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Payments ─────────────────────────────────────────────────────────────────
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_profiles.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(500))
+    is_paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    period_start: Mapped[Optional[date]] = mapped_column(Date)
+    period_end: Mapped[Optional[date]] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    parent: Mapped["ParentProfile"] = relationship(back_populates="payments")
+    child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Tutor Payouts (выплаты зарплаты репетиторам) ─────────────────────────────
+
+class TutorPayout(Base):
+    """Запись о выплате репетитору. Обнуляет текущий баланс (заработано - выплачено)."""
+    __tablename__ = "tutor_payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    paid_at: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship(back_populates="payouts")
+
+
+# ─── Prices ───────────────────────────────────────────────────────────────────
+
+class Price(Base):
+    __tablename__ = "prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject_id: Mapped[Optional[int]] = mapped_column(ForeignKey("subjects.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    price_per_lesson: Mapped[float] = mapped_column(Float, nullable=False)
+    lessons_in_package: Mapped[Optional[int]] = mapped_column(Integer)
+    discount_percent: Mapped[Optional[float]] = mapped_column(Float)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    subject: Mapped[Optional["Subject"]] = relationship(back_populates="prices")
+
+
+# ─── Reviews ──────────────────────────────────────────────────────────────────
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[Optional[int]] = mapped_column(ForeignKey("parent_profiles.id"))
+    tutor_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tutor_profiles.id"))
+    author_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, default=5)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ─── Free Lesson Requests ─────────────────────────────────────────────────────
+
+class LeadRequest(Base):
+    """Заявка с публичного сайта на бесплатное занятие"""
+    __tablename__ = "lead_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    phone: Mapped[str] = mapped_column(String(30), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    subject_id: Mapped[Optional[int]] = mapped_column(ForeignKey("subjects.id"))
+    message: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[RequestStatus] = mapped_column(Enum(RequestStatus), default=RequestStatus.new)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Реферальная заявка (страница pifagor.by/r/<код>)
+    ref_code: Mapped[Optional[str]] = mapped_column(String(12), index=True)
+    referrer_child_id: Mapped[Optional[int]] = mapped_column(ForeignKey("child_profiles.id", ondelete="SET NULL"), index=True)
+    # почему заявка не засчитана: test / duplicate / own / in_crm / excluded; пусто — засчитана
+    ref_flag: Mapped[Optional[str]] = mapped_column(String(20))
+    child_name: Mapped[Optional[str]] = mapped_column(String(200))
+    grade: Mapped[Optional[str]] = mapped_column(String(20))
+    phone_norm: Mapped[Optional[str]] = mapped_column(String(20), index=True)
+
+    subject: Mapped[Optional["Subject"]] = relationship()
+
+
+# ─── FAQ ──────────────────────────────────────────────────────────────────────
+
+class FAQ(Base):
+    __tablename__ = "faqs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    question: Mapped[str] = mapped_column(String(500), nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[Optional[int]] = mapped_column(ForeignKey("subjects.id"), nullable=True)
+    order: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    subject: Mapped[Optional["Subject"]] = relationship()
+
+
+# ─── Notifications ────────────────────────────────────────────────────────────
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="notifications")
+
+
+# ─── Comments (parent → tutor) ────────────────────────────────────────────────
+
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_profiles.id"))
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    parent: Mapped["ParentProfile"] = relationship(back_populates="comments")
+    tutor: Mapped["TutorProfile"] = relationship()
+    child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Acts (акты выполненных работ) ───────────────────────────────────────────
+
+class Act(Base):
+    __tablename__ = "acts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    lessons_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    blank_url: Mapped[Optional[str]] = mapped_column(String(500))    # пустой акт для скачивания
+    signed_url: Mapped[Optional[str]] = mapped_column(String(500))   # подписанный акт от репетитора
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    tutor: Mapped["TutorProfile"] = relationship()
+
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+
+class Test(Base):
+    __tablename__ = "tests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id"))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    questions: Mapped[List["TestQuestion"]] = relationship(back_populates="test", cascade="all, delete-orphan")
+    results: Mapped[List["TestResult"]] = relationship(back_populates="test")
+
+
+class TestQuestion(Base):
+    __tablename__ = "test_questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    test_id: Mapped[int] = mapped_column(ForeignKey("tests.id"))
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    question_type: Mapped[str] = mapped_column(String(30), default="single")  # single, multiple, text
+    order: Mapped[int] = mapped_column(Integer, default=0)
+
+    test: Mapped["Test"] = relationship(back_populates="questions")
+    answers: Mapped[List["TestAnswer"]] = relationship(back_populates="question", cascade="all, delete-orphan")
+
+
+class TestAnswer(Base):
+    __tablename__ = "test_answers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("test_questions.id"))
+    text: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    question: Mapped["TestQuestion"] = relationship(back_populates="answers")
+
+
+class TestResult(Base):
+    __tablename__ = "test_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    test_id: Mapped[int] = mapped_column(ForeignKey("tests.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    score: Mapped[Optional[float]] = mapped_column(Float)
+    answers_json: Mapped[Optional[str]] = mapped_column(Text)  # JSON строка с ответами
+    completed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    test: Mapped["Test"] = relationship(back_populates="results")
+    child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Invite Codes (Коды доступа) ──────────────────────────────────────────────
+
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    role: Mapped[RoleEnum] = mapped_column(Enum(RoleEnum), nullable=False)  # tutor, child, parent
+    description: Mapped[Optional[str]] = mapped_column(String(500))  # Описание (кому выдан)
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Связь для пары Ученик + Родитель (ссылается на ID этого же кода)
+    linked_code_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invite_codes.id"))
+
+    # 🌟 ДОБАВЛЯЕМ СЮДА: Запоминаем, какой user_id активировал этот конкретный код
+    used_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Релейшн на самого себя, чтобы удобно подтягивать пару из базы
+    linked_code: Mapped[Optional["InviteCode"]] = relationship(remote_side=[id])
+
+
+# ─── Email Receipts (чеки EasyPay) ────────────────────────────────────────────
+
+class EmailReceipt(Base):
+    """Parsed EasyPay payment receipts from email inbox."""
+    __tablename__ = "email_receipts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    receipt_number: Mapped[Optional[str]] = mapped_column(String(100))
+    payer_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    payment_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    raw_text: Mapped[Optional[str]] = mapped_column(Text)
+    # Linked child profile (matched by account number or name)
+    child_id: Mapped[Optional[int]] = mapped_column(ForeignKey("child_profiles.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    child: Mapped[Optional["ChildProfile"]] = relationship()
+    splits: Mapped[List["EmailReceiptSplit"]] = relationship(back_populates="receipt")
+
+
+class EmailReceiptSplit(Base):
+    """Когда один чек относится сразу к нескольким ученикам (например,
+    брат и сестра, оплаченные одним платежом) — сумма делится между ними
+    поровну и записывается здесь, отдельно от основного email_receipts.child_id."""
+    __tablename__ = "email_receipt_splits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(ForeignKey("email_receipts.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    receipt: Mapped["EmailReceipt"] = relationship(back_populates="splits")
+    child: Mapped["ChildProfile"] = relationship()
+
+
+class PayerChildLink(Base):
+    """Запоминает, к какому ученику (или ученикам) админ вручную привязал
+    плательщика с таким именем — чтобы в будущем чеки от того же
+    плательщика подхватывались автоматически, без повторной ручной работы."""
+    __tablename__ = "payer_child_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payer_name_normalized: Mapped[str] = mapped_column(String(300), index=True, nullable=False)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    child: Mapped["ChildProfile"] = relationship()
+
+
+# ─── Контроль качества (Quality system) ───────────────────────────────────────
+
+class QmCall(Base):
+    """Звонок менеджера по качеству родителю ученика.
+    status: new — нужно позвонить, done — звонок совершён (кейс закрыт).
+    reason: trial_2w — 2 недели после пробного, quality — контроль качества."""
+    __tablename__ = "qm_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    reason: Mapped[str] = mapped_column(String(30), nullable=False, default="quality")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="new", index=True)
+    feedback: Mapped[Optional[str]] = mapped_column(String(10))  # green | yellow | orange | red
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="auto")  # auto | manual
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    child: Mapped["ChildProfile"] = relationship()
+
+
+class QmRegularity(Base):
+    """Регулярность: клиент без занятий 7+ дней.
+    status: waiting — ожидает, in_work — в работе, closed — закрыт."""
+    __tablename__ = "qm_regularity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    last_lesson_date: Mapped[Optional[date]] = mapped_column(Date)
+    next_lesson_date: Mapped[Optional[date]] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="waiting")
+    overdue: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    child: Mapped["ChildProfile"] = relationship()
+
+
+class QmJob(Base):
+    """Когда последний раз выполнялось плановое обновление таблиц контроля качества."""
+    __tablename__ = "qm_jobs"
+
+    name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    last_run: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+
+# ─── Аналитика ────────────────────────────────────────────────────────────────
+
+class AnalyticsDaily(Base):
+    """Снимок на каждый день: сколько клиентов было в CRM."""
+    __tablename__ = "analytics_daily"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    active_clients: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CrmStatusEvent(Base):
+    """История смены CRM-статуса ученика (чтобы знать дату отказа/перехода в клиенты)."""
+    __tablename__ = "crm_status_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    old_status: Mapped[Optional[str]] = mapped_column(String(50))
+    new_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class AnalyticsClientDay(Base):
+    """Ночной снимок по каждому ученику: статус в CRM и план «в неделю» на этот день.
+    Нужен, чтобы коэффициент частотности за прошлые недели считался по плану
+    и статусу именно той недели, а не по нынешним."""
+    __tablename__ = "analytics_client_days"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), primary_key=True, index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(50))
+    plan: Mapped[Optional[int]] = mapped_column(Integer)
+
+
+class FreqIssue(Base):
+    """Недобор частотности ученика за неделю: комментарий менеджера и отметка «Разобрано»."""
+    __tablename__ = "freq_issues"
+    __table_args__ = (UniqueConstraint("child_id", "week_start", name="ux_freq_issues_child_week"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    week_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    comment_by: Mapped[Optional[str]] = mapped_column(String(200))
+    comment_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AnalyticsArchive(Base):
+    """Закреплённые итоги аналитики за прошедшие периоды (день/неделя/месяц/год).
+    Записываются через 14 дней после окончания периода и больше не меняются —
+    удаление учеников/репетиторов или правки задним числом не меняют прошлые графики."""
+    __tablename__ = "analytics_archive"
+
+    kind: Mapped[str] = mapped_column(String(10), primary_key=True)
+    key: Mapped[str] = mapped_column(String(16), primary_key=True)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReferralLink(Base):
+    """Кто кого привёл: новый ученик (child_id) — по рекомендации referrer_child_id.
+    Создаётся автоматически (совпал телефон/имя с реферальной заявкой) или из
+    строки «Пригласил: Фамилия Имя» в комментарии ученика."""
+    __tablename__ = "referral_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), unique=True, index=True)
+    referrer_child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    lead_id: Mapped[Optional[int]] = mapped_column(ForeignKey("lead_requests.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="form")  # form | comment
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class StudentPriceHistory(Base):
+    """История цены занятия ученика: новая цена действует с даты, прошлые
+    занятия считаются по цене, действовавшей на их дату."""
+    __tablename__ = "student_price_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    discount_pct: Mapped[Optional[int]] = mapped_column(Integer)  # скидка за рекомендации (5/10), если это она
+    reason: Mapped[Optional[str]] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LkEvent(Base):
+    """Посещения личного кабинета родителями и учениками: сеансы и просмотры
+    разделов (оплаты, список занятий, прочитанные отчёты, ДЗ). Заходы из
+    браузеров, где открывали CRM, сюда не попадают."""
+    __tablename__ = "lk_events"
+    __table_args__ = (Index("ix_lk_events_user_kind_at", "user_id", "kind", "at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    platform: Mapped[Optional[str]] = mapped_column(String(2))
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    page: Mapped[Optional[str]] = mapped_column(String(20))      # для kind="dwell": какая вкладка
+    seconds: Mapped[Optional[int]] = mapped_column(Integer)       # для kind="dwell": сколько секунд на ней пробыли
