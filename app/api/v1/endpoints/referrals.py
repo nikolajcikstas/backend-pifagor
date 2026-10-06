@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_admin
@@ -50,14 +50,36 @@ async def _parent_name(db: AsyncSession, child_id: int) -> str:
 
 # ─── публичная страница ───────────────────────────────────────────────────────
 
+_REF_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 @router.get("/ref/{code}")
 async def ref_info(code: str, db: AsyncSession = Depends(get_db)):
-    child = await _child_by_code(db, code)
-    if not child:
+    """Имя пригласившего для страницы приглашения. Один запрос к базе и кеш
+    на 10 минут — заголовок «Вас пригласил(а) …» должен появляться сразу."""
+    import time as _t
+    code = (code or "").strip().upper()
+    hit = _REF_CACHE.get(code)
+    if hit and _t.monotonic() - hit[0] < 600:
+        return hit[1]
+    if not code or len(code) > 12:
         raise HTTPException(status_code=404, detail="Ссылка не найдена")
-    subjects = (await db.execute(select(Subject.id, Subject.name).where(Subject.is_active == True).order_by(Subject.name))).all()
-    return {"code": child.ref_code, "referrer_name": await _parent_name(db, child.id) or await _name(db, child.id),
-            "subjects": [{"id": i, "name": n} for i, n in subjects]}
+    row = (await db.execute(text(
+        "SELECT c.ref_code, "
+        "(SELECT TRIM(COALESCE(pu.last_name, '') || ' ' || COALESCE(pu.first_name, '')) "
+        "   FROM parent_children pc JOIN parent_profiles pp ON pp.id = pc.parent_id JOIN users pu ON pu.id = pp.user_id "
+        "  WHERE pc.child_id = c.id AND TRIM(COALESCE(pu.last_name, '') || COALESCE(pu.first_name, '')) <> '' "
+        "  ORDER BY pc.id LIMIT 1) AS parent_name, "
+        "TRIM(COALESCE(cu.last_name, '') || ' ' || COALESCE(cu.first_name, '')) AS child_name "
+        "FROM child_profiles c LEFT JOIN users cu ON cu.id = c.user_id WHERE c.ref_code = :code LIMIT 1"
+    ), {"code": code})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Ссылка не найдена")
+    out = {"code": row[0], "referrer_name": row[1] or row[2] or "", "subjects": []}
+    if len(_REF_CACHE) > 2000:
+        _REF_CACHE.clear()
+    _REF_CACHE[code] = (_t.monotonic(), out)
+    return out
 
 
 class RefLeadIn(BaseModel):
