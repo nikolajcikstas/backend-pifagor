@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     Boolean, Date, DateTime, Enum, ForeignKey,
-    Integer, String, Text, Time, Float, LargeBinary, UniqueConstraint, func
+    Index, Integer, String, Text, Time, Float, LargeBinary, UniqueConstraint, func
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -805,3 +805,21 @@ class StudentPriceHistory(Base):
     discount_pct: Mapped[Optional[int]] = mapped_column(Integer)  # скидка за рекомендации (5/10), если это она
     reason: Mapped[Optional[str]] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LkEvent(Base):
+    """Посещения личного кабинета родителями и учениками: сеансы и просмотры
+    разделов (оплаты, список занятий, прочитанные отчёты, ДЗ). Заходы из
+    браузеров, где открывали CRM, сюда не попадают."""
+    __tablename__ = "lk_events"
+    __table_args__ = (Index("ix_lk_events_user_kind_at", "user_id", "kind", "at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    platform: Mapped[Optional[str]] = mapped_column(String(2))
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    page: Mapped[Optional[str]] = mapped_column(String(20))      # для kind="dwell": какая вкладка
+    seconds: Mapped[Optional[int]] = mapped_column(Integer)       # для kind="dwell": сколько секунд на ней пробыли

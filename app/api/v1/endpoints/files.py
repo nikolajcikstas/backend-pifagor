@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -8,6 +11,7 @@ from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
+from app.core.config import settings
 from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.models import User, RoleEnum, StoredFile, Homework, Lesson, ParentChild, TutorDocument
@@ -142,5 +146,58 @@ async def get_file(
             "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(stored.name)}",
             "Cache-Control": "private, max-age=86400",
             "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# ─── скачивание по временной ссылке ──────────────────────────────────────────
+# На телефонах (особенно iPhone и браузеры внутри Telegram/Viber) скачивание
+# через JavaScript часто не срабатывает. Поэтому кабинет сначала получает
+# короткую ссылку (живёт 10 минут, привязана к файлу), и телефон открывает
+# файл обычным переходом — как любую ссылку на PDF или фото.
+LINK_TTL = 600
+
+
+def _link_sig(file_id: str, exp: int) -> str:
+    msg = f"{file_id}:{exp}".encode("utf-8")
+    return hmac.new(settings.SECRET_KEY.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:32]
+
+
+@router.post("/{file_id}/link")
+async def file_link(
+    file_id: str,
+    download: bool = True,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not file_id.isalnum() or len(file_id) > 32:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    stored = await db.scalar(select(StoredFile).options(defer(StoredFile.data)).where(StoredFile.id == file_id))
+    if not stored:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    if not await _can_access(db, current_user, stored):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    exp = int(time.time()) + LINK_TTL
+    q = f"e={exp}&s={_link_sig(file_id, exp)}" + ("&download=1" if download else "")
+    return {"url": f"{FILE_URL_PREFIX}{file_id}/dl/{quote(stored.name)}?{q}", "name": stored.name}
+
+
+@router.get("/{file_id}/dl/{name}")
+async def file_by_link(file_id: str, name: str, e: int, s: str, download: bool = False, db: AsyncSession = Depends(get_db)):
+    if not file_id.isalnum() or len(file_id) > 32 or e < time.time() or not hmac.compare_digest(s, _link_sig(file_id, e)):
+        raise HTTPException(status_code=404, detail="Ссылка устарела — откройте файл в кабинете ещё раз")
+    stored = await db.scalar(select(StoredFile).options(defer(StoredFile.data)).where(StoredFile.id == file_id))
+    if not stored:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    data = await db.scalar(select(StoredFile.data).where(StoredFile.id == file_id))
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=data,
+        media_type=stored.mime,
+        headers={
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(stored.name)}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
         },
     )

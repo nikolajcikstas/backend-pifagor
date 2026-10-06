@@ -259,6 +259,9 @@ async def _init_database_schema() -> bool:
                     "CREATE INDEX IF NOT EXISTS ix_lead_requests_ref_code ON lead_requests (ref_code)",
                     "CREATE INDEX IF NOT EXISTS ix_lead_requests_referrer_child_id ON lead_requests (referrer_child_id)",
                     "CREATE INDEX IF NOT EXISTS ix_lead_requests_phone_norm ON lead_requests (phone_norm)",
+                    # учёт посещений личного кабинета: время на вкладках
+                    "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS page VARCHAR(20)",
+                    "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS seconds INTEGER",
 
                     "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'lessonstatus') THEN ALTER TYPE lessonstatus ADD VALUE IF NOT EXISTS 'trial'; END IF; END $$",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS lesson_price DOUBLE PRECISION NOT NULL DEFAULT 40",
