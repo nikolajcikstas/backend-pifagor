@@ -53,7 +53,8 @@ class AdminStudentUpdate(BaseModel):
     last_name: Optional[str] = None
     phone: Optional[str] = None
     status: Optional[str] = None
-    lessons_per_week: Optional[int] = None
+    lessons_per_week: Optional[float] = None
+    lessons_per_week_from: Optional[date] = None  # с какой даты действует новый план
     notes: Optional[str] = None
     channel: Optional[str] = None
     parent_name: Optional[str] = None
@@ -443,6 +444,7 @@ async def update_admin_student(
     user_id: int,
     payload: AdminStudentUpdate,
     db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(require_admin),
 ):
     result = await db.execute(
         select(User)
@@ -492,7 +494,14 @@ async def update_admin_student(
     if payload.status is not None:
         student.child_profile.crm_status = payload.status.strip() or "Пробное"
     if payload.lessons_per_week is not None:
-        student.child_profile.lessons_per_week = payload.lessons_per_week
+        lpw = round(float(payload.lessons_per_week), 2)
+        if lpw < 0 or lpw > 21:
+            raise HTTPException(status_code=400, detail="Занятий в неделю: от 0 до 21 (можно дробное, например 0,5 — раз в 2 недели)")
+        if lpw != student.child_profile.lessons_per_week:
+            student.child_profile.lessons_per_week = lpw
+            from app.api.v1.endpoints.analytics import apply_plan_change
+            await apply_plan_change(db, student.child_profile.id, lpw, payload.lessons_per_week_from,
+                                    who=f"{current_admin.last_name or ''} {current_admin.first_name or ''}".strip() or current_admin.email)
     if payload.notes is not None:
         student.child_profile.notes = payload.notes.strip() or None
     if payload.channel is not None:

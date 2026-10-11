@@ -6,6 +6,8 @@ from app.api.v1.endpoints import quality
 from app.api.v1.endpoints import analytics
 from app.api.v1.endpoints import referrals
 from app.api.v1.endpoints import lk
+from app.api.v1.endpoints import budget
+from app.api.v1.endpoints import tutor_board
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -19,3 +21,5 @@ api_router.include_router(quality.router)
 api_router.include_router(analytics.router)
 api_router.include_router(referrals.router)
 api_router.include_router(lk.router)
+api_router.include_router(budget.router)
+api_router.include_router(tutor_board.router)

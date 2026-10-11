@@ -122,7 +122,8 @@ class ChildProfile(Base):
     grade: Mapped[Optional[int]] = mapped_column(Integer)
     lesson_price: Mapped[float] = mapped_column(Float, default=40, server_default="40", nullable=False)
     crm_status: Mapped[str] = mapped_column(String(50), default="Пробное", server_default="Пробное", nullable=False)
-    lessons_per_week: Mapped[Optional[int]] = mapped_column(Integer)
+    # план «в неделю»; дробный для редких занятий: 0.5 — раз в 2 недели
+    lessons_per_week: Mapped[Optional[float]] = mapped_column(Float)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     channel: Mapped[Optional[str]] = mapped_column(String(100))
     subjects_text: Mapped[Optional[str]] = mapped_column(Text)
@@ -748,7 +749,7 @@ class AnalyticsClientDay(Base):
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), primary_key=True, index=True)
     status: Mapped[Optional[str]] = mapped_column(String(50))
-    plan: Mapped[Optional[int]] = mapped_column(Integer)
+    plan: Mapped[Optional[float]] = mapped_column(Float)
 
 
 class FreqIssue(Base):
@@ -823,3 +824,72 @@ class LkEvent(Base):
     day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     page: Mapped[Optional[str]] = mapped_column(String(20))      # для kind="dwell": какая вкладка
     seconds: Mapped[Optional[int]] = mapped_column(Integer)       # для kind="dwell": сколько секунд на ней пробыли
+
+
+class ChildPlanHistory(Base):
+    """План «в неделю» с датой начала действия. Аналитика частотности берёт
+    план недели отсюда (последняя запись не позже конца недели); для недель
+    раньше первой записи — из ночных снимков, как раньше."""
+    __tablename__ = "child_plan_history"
+    __table_args__ = (Index("ix_child_plan_history_child_from", "child_id", "effective_from"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("child_profiles.id", ondelete="CASCADE"), nullable=False)
+    plan: Mapped[Optional[float]] = mapped_column(Float)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_by: Mapped[Optional[str]] = mapped_column(String(200))
+
+
+# ─── Бюджет: зашифрованное хранилище ─────────────────────────────────────────
+
+class BudgetVault(Base):
+    """Ключ шифрования данных бюджета, «завёрнутый» паролем бюджета.
+    Сам пароль нигде не хранится: без него данные не расшифровать даже
+    при полном доступе к базе."""
+    __tablename__ = "budget_vault"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    kdf: Mapped[str] = mapped_column(String(60), nullable=False)
+    wrapped_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    failed: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+
+class BudgetBlob(Base):
+    """Зашифрованные настройки бюджета (AES-256-GCM)."""
+    __tablename__ = "budget_blobs"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(200))
+
+
+class BudgetAudit(Base):
+    """Журнал доступа к бюджету: входы, неудачные попытки, сохранения."""
+    __tablename__ = "budget_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer)
+    who: Mapped[Optional[str]] = mapped_column(String(200))
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    ip: Mapped[Optional[str]] = mapped_column(String(64))
+    at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TutorContractInfo(Base):
+    """Дашборд договоров репетиторов: что делать с договором, дата окончания,
+    комментарий. Статус договора вычисляется из этих полей."""
+    __tablename__ = "tutor_contract_info"
+
+    tutor_id: Mapped[int] = mapped_column(ForeignKey("tutor_profiles.id", ondelete="CASCADE"), primary_key=True)
+    action: Mapped[Optional[str]] = mapped_column(String(60))
+    end_date: Mapped[Optional[date]] = mapped_column(Date)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(200))

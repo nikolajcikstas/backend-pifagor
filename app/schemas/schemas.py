@@ -34,8 +34,10 @@ class TokenRefresh(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+    # Без строгой проверки формата: телефон может добавить пробел в конце или
+    # заглавную букву — нормализуем при входе, а не отказываем.
+    email: str = Field(..., max_length=320)
+    password: str = Field(..., max_length=500)
 
 
 # ─── User ─────────────────────────────────────────────────────────────────────

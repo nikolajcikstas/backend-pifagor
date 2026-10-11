@@ -54,6 +54,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ("POST", "/api/v1/auth/forgot-password/request"): (5, 300),
         ("POST", "/api/v1/auth/forgot-password"): (10, 300),
         ("POST", "/api/v1/change-password"): (10, 300),
+        # бюджет: подбор пароля — не чаще 10 попыток за 5 минут с одного адреса
+        ("POST", "/api/v1/budget/unlock"): (10, 300),
+        ("POST", "/api/v1/budget/setup"): (5, 300),
+        ("POST", "/api/v1/budget/reset"): (5, 300),
+        ("POST", "/api/v1/budget/password"): (5, 300),
     }
 
     async def dispatch(self, request: Request, call_next):
@@ -262,11 +267,18 @@ async def _init_database_schema() -> bool:
                     # учёт посещений личного кабинета: время на вкладках
                     "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS page VARCHAR(20)",
                     "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS seconds INTEGER",
+                    # дробный план «в неделю» (0.5 — раз в 2 недели); меняем тип один раз
+                    "DO $$ BEGIN IF (SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() "
+                    "AND table_name = 'child_profiles' AND column_name = 'lessons_per_week') = 'integer' THEN "
+                    "ALTER TABLE child_profiles ALTER COLUMN lessons_per_week TYPE DOUBLE PRECISION; END IF; END $$",
+                    "DO $$ BEGIN IF (SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() "
+                    "AND table_name = 'analytics_client_days' AND column_name = 'plan') = 'integer' THEN "
+                    "ALTER TABLE analytics_client_days ALTER COLUMN plan TYPE DOUBLE PRECISION; END IF; END $$",
 
                     "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'lessonstatus') THEN ALTER TYPE lessonstatus ADD VALUE IF NOT EXISTS 'trial'; END IF; END $$",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS lesson_price DOUBLE PRECISION NOT NULL DEFAULT 40",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS crm_status VARCHAR(50) NOT NULL DEFAULT 'Пробное'",
-                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS lessons_per_week INTEGER",
+                    "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS lessons_per_week DOUBLE PRECISION",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS notes TEXT",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS channel VARCHAR(100)",
                     "ALTER TABLE child_profiles ADD COLUMN IF NOT EXISTS subjects_text TEXT",
@@ -398,6 +410,38 @@ async def _init_database_schema() -> bool:
         failures += 1
         logger.warning("SCHEMA one-time data migration failed: %s: %s", type(e).__name__, str(e)[:200])
 
+    # План «в неделю» с датой начала (история плана). Один раз при обновлении:
+    # • всем ученикам — нынешний план из CRM с понедельника текущей недели;
+    # • Клинцову Дмитрию и Ануфриенко — нынешний план из CRM за всю историю
+    #   (у них план в CRM давно был другим, чем в аналитике).
+    try:
+        async with asyncio.timeout(40):
+            async with engine.begin() as conn:
+                await conn.execute(text("SET LOCAL lock_timeout = '8s'"))
+                first_time = (await conn.execute(text(
+                    "INSERT INTO app_data_migrations (name) VALUES ('plan_history_init_2026_10') "
+                    "ON CONFLICT (name) DO NOTHING RETURNING name"
+                ))).first()
+                if first_time:
+                    whole = (await conn.execute(text(
+                        "SELECT c.id, u.last_name, u.first_name FROM child_profiles c JOIN users u ON u.id = c.user_id "
+                        "WHERE (lower(trim(u.last_name)) = 'клинцов' AND lower(trim(u.first_name)) = 'дмитрий') "
+                        "OR lower(trim(u.last_name)) = 'ануфриенко'"
+                    ))).all()
+                    whole_ids = [r[0] for r in whole]
+                    res = await conn.execute(text(
+                        "INSERT INTO child_plan_history (child_id, plan, effective_from, created_at, created_by) "
+                        "SELECT c.id, c.lessons_per_week, "
+                        "CASE WHEN c.id = ANY(:whole) THEN DATE '2000-01-01' "
+                        "ELSE date_trunc('week', (now() AT TIME ZONE 'Europe/Minsk'))::date END, "
+                        "now() AT TIME ZONE 'UTC', 'система: план из CRM' FROM child_profiles c"
+                    ), {"whole": whole_ids})
+                    logger.warning("Plan history initialised: %s children; whole history from CRM for: %s",
+                                   res.rowcount, ", ".join(f"{r[1]} {r[2]}" for r in whole) or "nobody")
+    except Exception as e:
+        failures += 1
+        logger.warning("SCHEMA one-time plan history init failed: %s: %s", type(e).__name__, str(e)[:200])
+
     logger.warning("SCHEMA initialization finished (failures: %s)", failures)
     return failures == 0
 
@@ -436,7 +480,7 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Budget-Token"],
 )
 
 app.include_router(api_router)

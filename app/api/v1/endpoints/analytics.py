@@ -44,6 +44,7 @@ from app.db.session import get_db
 from app.models.models import (
     ChildProfile, User, Lesson, LessonStatus, TutorProfile, TutorRateHistory, EmailReceipt,
     AnalyticsDaily, CrmStatusEvent, AnalyticsClientDay, FreqIssue, AnalyticsArchive,
+    ChildPlanHistory, TutorPayout,
 )
 from app.api.v1.endpoints.quality import _now_minsk
 
@@ -276,6 +277,7 @@ class _FreqCalc:
         self.first_trial: dict[int, date] = {}
         self.left_spans: dict[int, list] = defaultdict(list)  # периоды в статусе «Отказ»/«Не занимаются»
         self.plan_snaps: dict[int, tuple] = {}  # cid -> ([дни], [планы]) по возрастанию
+        self.plan_hist: dict[int, tuple] = {}   # cid -> ([с какой даты], [план]) — из CRM «действует с»
         self.les: dict[tuple, int] = defaultdict(int)          # (cid, пн) -> занятий
         self.hrs: dict[tuple, float] = defaultdict(float)
         self.unmarked: dict[date, int] = defaultdict(int)      # пн -> неотмеченных прошедших занятий
@@ -285,6 +287,10 @@ class _FreqCalc:
         return bool(k) and (k[0] in LEFT_STATUSES or k[2] is False)
 
     def plan_at(self, cid: int, w: date):
+        end = w + timedelta(days=6)
+        hist = self.plan_hist.get(cid)
+        if hist and hist[0][0] <= end:
+            return hist[1][bisect_right(hist[0], end) - 1]
         snaps = self.plan_snaps.get(cid)
         if snaps:
             i = bisect_right(snaps[0], w + timedelta(days=6))
@@ -416,6 +422,17 @@ async def _freq_calc(db: AsyncSession, w_from: date, w_to: date, today: date) ->
         for i, e in enumerate(lst):
             if e[2] in LEFT_STATUSES:
                 c.left_spans[cid].append((_minsk_date(e[3]), _minsk_date(lst[i + 1][3]) if i + 1 < len(lst) else None))
+    # план с датой начала действия (из CRM); при одной дате берётся последняя запись
+    for cid, eff, plan in (await db.execute(
+        select(ChildPlanHistory.child_id, ChildPlanHistory.effective_from, ChildPlanHistory.plan)
+        .order_by(ChildPlanHistory.child_id, ChildPlanHistory.effective_from, ChildPlanHistory.id)
+    )).all():
+        days, plans = c.plan_hist.setdefault(cid, ([], []))
+        if days and days[-1] == eff:
+            plans[-1] = plan
+        else:
+            days.append(eff)
+            plans.append(plan)
     # ночные снимки: план на конец недели и статус по дням
     for cid, d, st, plan in (await db.execute(
         select(AnalyticsClientDay.child_id, AnalyticsClientDay.day, AnalyticsClientDay.status, AnalyticsClientDay.plan)
@@ -532,6 +549,25 @@ ARCHIVE_VERSION = 1
 def _settled_until(today: date) -> date:
     """Последний день, итоги по которому уже закрепляются."""
     return today - timedelta(days=ARCHIVE_SETTLE_DAYS + 1)
+
+
+async def apply_plan_change(db: AsyncSession, child_id: int, plan: Optional[float],
+                            effective_from: Optional[date] = None, who: Optional[str] = None) -> date:
+    """План «в неделю» изменили в CRM: записываем его в историю с датой начала.
+    По умолчанию — с понедельника текущей недели. Недели до этой даты считаются
+    по прежнему плану, с этой даты — по новому. Коммит — у вызывающего."""
+    today = _now_minsk().date()
+    eff = effective_from or _monday(today)
+    if eff > today:
+        eff = today
+    db.add(ChildPlanHistory(child_id=child_id, plan=plan, effective_from=eff, created_by=who))
+    # снимок за сегодня — тоже новый план (на случай, если история окажется пустой)
+    await db.execute(
+        AnalyticsClientDay.__table__.update()
+        .where(AnalyticsClientDay.child_id == child_id, AnalyticsClientDay.day == today)
+        .values(plan=plan)
+    )
+    return eff
 
 
 def _weeks_in(a: date, b: date) -> list[date]:
@@ -1054,6 +1090,37 @@ async def finance_state(db: AsyncSession = Depends(get_db)):
 
 # ─── план/факт частотности по ученикам ────────────────────────────────────────
 
+@router.get("/people", dependencies=[Depends(require_admin)])
+async def people_state(db: AsyncSession = Depends(get_db)):
+    """Ученики-клиенты по классам и сколько сейчас должны репетиторам
+    (проведённые занятия × ставка на дату занятия − уже выплачено)."""
+    from app.api.v1.endpoints.admin import _tutor_earnings_map
+    grades = defaultdict(int)
+    for g, in (await db.execute(
+        select(ChildProfile.grade).join(User, User.id == ChildProfile.user_id)
+        .where(ChildProfile.crm_status == CLIENT, User.is_active.isnot(False))
+    )).all():
+        grades[g if g in range(1, 12) else None] += 1
+    tutors = (await db.execute(
+        select(TutorProfile.id, User.last_name, User.first_name, User.is_active)
+        .join(User, User.id == TutorProfile.user_id)
+    )).all()
+    owed = await _tutor_earnings_map(db, [t[0] for t in tutors])
+    last_paid = dict((await db.execute(
+        select(TutorPayout.tutor_id, func.max(TutorPayout.paid_at)).group_by(TutorPayout.tutor_id)
+    )).all())
+    items = [{"tutor_id": tid, "name": f"{ln or ''} {fn or ''}".strip(), "amount": owed.get(tid, 0.0),
+              "last_paid": last_paid[tid].isoformat() if last_paid.get(tid) else None}
+             for tid, ln, fn, _a in tutors if owed.get(tid, 0) > 0.009]
+    items.sort(key=lambda x: -x["amount"])
+    return {
+        "grades": [{"grade": g, "count": grades.get(g, 0)} for g in list(range(1, 12)) + [None]],
+        "clients": sum(grades.values()),
+        "tutors_owed_total": round(sum(x["amount"] for x in items), 2),
+        "tutors_owed": items,
+    }
+
+
 def _user_label(u: User) -> str:
     return f"{u.last_name or ''} {u.first_name or ''}".strip() or (u.email or "")
 
@@ -1071,6 +1138,27 @@ def _issue_dict(x: Optional[FreqIssue]) -> Optional[dict]:
     }
 
 
+def _plan_window(plan) -> int:
+    """За сколько недель сверять план. Целый план — по неделе. Дробный — за
+    наименьшее число недель, где он становится целым: 0,5 — 2 недели (раз в
+    2 недели), 1,5 — 2 недели, 0,33 — 3 недели. Иначе при плане «раз в
+    2 недели» каждая вторая неделя выглядела бы как недобор."""
+    if not plan or plan <= 0:
+        return 1
+    for k in range(1, 9):
+        if round(plan * k) >= 1 and abs(plan * k - round(plan * k)) < 0.05:
+            return k
+    return max(1, min(8, int(-(-1 // plan)))) if plan < 1 else 1
+
+
+def _num(x):
+    """Число для ответа: целое без «.0», дробное — до сотых."""
+    if x is None:
+        return None
+    x = round(float(x), 2)
+    return int(x) if x == int(x) else x
+
+
 @router.get("/students-frequency", dependencies=[Depends(require_admin)])
 async def students_frequency(week: Optional[date] = Query(None), db: AsyncSession = Depends(get_db)):
     """Клиенты: план из CRM («В неделю») и факт — проведённые (не пробные)
@@ -1084,7 +1172,7 @@ async def students_frequency(week: Optional[date] = Query(None), db: AsyncSessio
     start = _monday(week)
     end = start + timedelta(days=6)
     w4 = [start - timedelta(weeks=k) for k in (3, 2, 1, 0)]
-    calc = await _freq_calc(db, w4[0], start, today)
+    calc = await _freq_calc(db, start - timedelta(weeks=8), start, today)
     children = (await db.execute(
         select(ChildProfile.id, User.last_name, User.first_name)
         .join(User, User.id == ChildProfile.user_id)
@@ -1113,22 +1201,37 @@ async def students_frequency(week: Optional[date] = Query(None), db: AsyncSessio
         fact = calc.les.get((cid, start), 0)
         elig = [w for w in w4 if calc.state(cid, w)[0] == "in"]
         avg4 = round(sum(calc.les.get((cid, w), 0) for w in elig) / len(elig), 2) if elig else None
-        gap = (plan - fact) if st == "in" else None
+        win = _plan_window(plan) if st == "in" else 1
+        plan_win = fact_win = None
+        if st == "in" and win > 1:
+            # дробный план: сверяем за последние win недель, если все они в расчёте
+            ws = [start - timedelta(weeks=k) for k in range(win)]
+            if all(calc.state(cid, w)[0] == "in" for w in ws):
+                plan_win = sum(calc.plan_at(cid, w) or 0 for w in ws)
+                # 0,33 × 3 недели = 0,99 — это «1 занятие»
+                plan_win = round(plan_win) if abs(plan_win - round(plan_win)) < 0.05 else round(plan_win, 2)
+                fact_win = sum(calc.les.get((cid, w), 0) for w in ws)
+                gap = round(plan_win - fact_win, 2)
+            else:
+                gap = None  # ещё не набралось нужное число недель
+        else:
+            gap = round(plan - fact, 2) if st == "in" else None
         cur = next((x for x in issues[cid] if x.week_start == start), None)
         prev = [x for x in issues[cid] if x.week_start < start]
         resolved_before = [x for x in prev if x.resolved_at is not None]
         repeat_n = len(resolved_before) + 1 if (resolved_before and gap is not None and gap > 0) else 0
         items.append({
             "child_id": cid, "name": f"{ln or ''} {fn or ''}".strip(),
-            "state": st or "none", "plan": plan if st == "in" else calc.plan_at(cid, start),
+            "state": st or "none", "plan": _num(plan if st == "in" else calc.plan_at(cid, start)),
             "fact_week": fact, "fact_avg4": avg4, "weeks_in4": len(elig),
-            "gap": gap, "tutors": tutors.get(cid, []),
+            "window": win, "plan_window": _num(plan_win), "fact_window": fact_win,
+            "gap": _num(gap), "tutors": tutors.get(cid, []),
             "issue": _issue_dict(cur), "repeat_n": repeat_n,
             "history": [_issue_dict(x) for x in prev if x.comment or x.resolved_at][:10],
         })
     items.sort(key=lambda x: (-(x["gap"] if x["gap"] is not None else -99), x["name"]))
     in_calc = [x for x in items if x["state"] == "in"]
-    under = [x for x in in_calc if x["gap"] > 0 and not (x["issue"] and x["issue"]["resolved"])]
+    under = [x for x in in_calc if x["gap"] is not None and x["gap"] > 0 and not (x["issue"] and x["issue"]["resolved"])]
     wk_info = calc.week(start)
     return {
         "week_start": start.isoformat(), "week_end": end.isoformat(),
@@ -1141,7 +1244,7 @@ async def students_frequency(week: Optional[date] = Query(None), db: AsyncSessio
         "new_count": sum(1 for x in items if x["state"] == "new"),
         "no_plan_count": sum(1 for x in items if x["state"] == "no_plan"),
         "in_count": len(in_calc),
-        "plan_total": sum(x["plan"] for x in in_calc),
+        "plan_total": _num(sum(x["plan"] for x in in_calc)),
         "fact_total": sum(x["fact_week"] for x in in_calc),
     }
 

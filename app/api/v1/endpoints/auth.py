@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import (
@@ -28,9 +28,18 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=Token)
 async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == data.email))
-    user = result.scalar_one_or_none()
-    if not user or not await averify_password(data.password, user.hashed_password):
+    email = (data.email or "").strip()
+    user = (await db.execute(select(User).where(User.email == email))).scalars().first()
+    if user is None and email:
+        # регистр букв не важен: «Ivanova@Mail.ru» = «ivanova@mail.ru»
+        same = (await db.execute(select(User).where(func.lower(User.email) == email.lower()).limit(2))).scalars().all()
+        if len(same) == 1:
+            user = same[0]
+    ok = bool(user) and await averify_password(data.password, user.hashed_password)
+    if user and not ok and data.password != data.password.strip():
+        # клавиатура телефона могла добавить пробел в начале или в конце пароля
+        ok = await averify_password(data.password.strip(), user.hashed_password)
+    if not ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Аккаунт отключён")
@@ -126,7 +135,9 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     if invite.role != data.role:
         raise HTTPException(status_code=400, detail="Код доступа не подходит для выбранной роли")
 
-    existing_email = await db.scalar(select(User).where(User.email == data.email))
+    existing_email = (await db.execute(
+        select(User).where(func.lower(User.email) == str(data.email).strip().lower()).limit(1)
+    )).scalars().first()
     target_user: User | None = None
     if invite.used_by_user_id:
         target_user = await db.scalar(select(User).where(User.id == invite.used_by_user_id))
