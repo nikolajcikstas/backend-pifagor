@@ -132,7 +132,13 @@ def compute(data: dict, with_extras: bool = True) -> dict:
     tut = []
     for t in data.get("tutors") or []:
         line = payroll(t.get("net") or 0, t.get("formal", True), t.get("deduction", False), c)
-        tut.append({**{k: t.get(k) for k in ("id", "name", "hours", "lessons")}, **line})
+        row = {**{k: t.get(k) for k in ("id", "name", "hours", "lessons")}, **line}
+        if t.get("revenue") is not None:
+            # что репетитор приносит: выручка его занятий − УСН и EasyPay с неё − его стоимость с налогами
+            rv = float(t["revenue"])
+            row["revenue"] = r2(rv)
+            row["contribution"] = r2(rv - rv * (c["usn_pct"] + c["easypay_pct"]) / 100 - line["cost"])
+        tut.append(row)
     stf = []
     for s in data.get("staff") or []:
         line = payroll(s.get("net") or 0, s.get("formal", True), s.get("deduction", False), c)
@@ -175,6 +181,9 @@ def compute(data: dict, with_extras: bool = True) -> dict:
             "withdraw_tax": r2(tot(tut, "withdraw_tax") + tot(stf, "withdraw_tax") + adv_tax + next_tax),
         },
     }
+    T = out["totals"]
+    T["taxes_all"] = r2(T["income_tax"] + T["pension"] + T["fszn"] + T["belgosstrakh"] + T["withdraw_tax"] + usn)
+    T["taxes_share_pct"] = round(100 * T["taxes_all"] / R, 1) if R > 0 else None
     out["waterfall"] = [
         {"key": "revenue", "label": "Выручка", "value": r2(R), "kind": "total"},
         {"key": "tutors", "label": "Репетиторы\n(с налогами)", "value": -tutors_cost, "kind": "minus"},

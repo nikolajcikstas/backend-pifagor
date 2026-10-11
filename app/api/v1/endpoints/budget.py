@@ -331,13 +331,15 @@ async def _month_facts(db: AsyncSession, month: str) -> dict:
             return float(h[1][i - 1] if i else h[1][0])
         return float((tutors.get(tid) or (None, None, 0))[2] or 0)
 
-    per = defaultdict(lambda: {"net": 0.0, "hours": 0.0, "lessons": 0})
+    per = defaultdict(lambda: {"net": 0.0, "hours": 0.0, "lessons": 0, "revenue": 0.0})
     revenue = hours = 0.0
     for cid, tid, d, ts, te in rows:
         dur = max(0.0, (datetime.combine(d, te) - datetime.combine(d, ts)).total_seconds() / 3600)
-        revenue += prices.price(cid, d)
+        price = prices.price(cid, d)
+        revenue += price
         hours += dur
         p = per[tid]
+        p["revenue"] += price
         p["net"] += rate_at(tid, d)
         p["hours"] += dur
         p["lessons"] += 1
@@ -345,10 +347,101 @@ async def _month_facts(db: AsyncSession, month: str) -> dict:
     for tid, p in per.items():
         ln, fn, _r = tutors.get(tid, ("", "", 0))
         tl.append({"id": tid, "name": f"{ln or ''} {fn or ''}".strip() or f"#{tid}",
-                   "net": r2(p["net"]), "hours": round(p["hours"], 2), "lessons": p["lessons"]})
+                   "net": r2(p["net"]), "hours": round(p["hours"], 2), "lessons": p["lessons"],
+                   "revenue": r2(p["revenue"])})
     tl.sort(key=lambda x: -x["net"])
     return {"revenue": r2(revenue), "hours": round(hours, 2), "lessons": len(rows), "tutors": tl,
-            "partial": end >= today, "start": start.isoformat(), "end": end.isoformat()}
+            "partial": end >= today, "start": start.isoformat(), "end": end.isoformat(),
+            "children": sorted({r[0] for r in rows})}
+
+
+async def _month_life(db: AsyncSession, month: str, facts: dict) -> dict:
+    """«Реальная жизнь» месяца — то, что не видно в ЧП, но съедает деньги:
+    поступления на счёт, долг клиентов, отмены, неотмеченные занятия,
+    пробные и движение учеников."""
+    from app.models.models import EmailReceipt
+    from sqlalchemy import cast, Date as _Date
+    start, end = _month_bounds(month)
+    now = datetime.utcnow() + timedelta(hours=3)
+    today, now_t = now.date(), now.time()
+    last = min(end, today)
+    out: dict = {"partial": facts["partial"]}
+    # поступило денег (чеки EasyPay по дате платежа)
+    cnt, total = (await db.execute(
+        select(func.count(EmailReceipt.id), func.coalesce(func.sum(EmailReceipt.amount), 0))
+        .where(cast(EmailReceipt.payment_date, _Date) >= start, cast(EmailReceipt.payment_date, _Date) <= end)
+    )).one()
+    out["cash_in"] = r2(float(total or 0))
+    out["cash_in_count"] = int(cnt or 0)
+    # отмены и прошедшие занятия без отметки
+    rows = (await db.execute(
+        select(Lesson.child_id, Lesson.date, Lesson.time_start, Lesson.time_end, Lesson.status)
+        .where(Lesson.date >= start, Lesson.date <= last,
+               Lesson.status.in_([LessonStatus.cancelled, LessonStatus.scheduled, LessonStatus.trial]))
+    )).all() if last >= start else []
+    prices = await load_prices(db, [r[0] for r in rows])
+    canc = {"count": 0, "hours": 0.0, "amount": 0.0}
+    unmarked = {"count": 0, "hours": 0.0, "amount": 0.0}
+    trial_children: dict[int, date] = {}
+    for cid, d, ts, te, stt in rows:
+        dur = max(0.0, (datetime.combine(d, te) - datetime.combine(d, ts)).total_seconds() / 3600)
+        if stt == LessonStatus.cancelled:
+            box = canc
+        elif stt == LessonStatus.scheduled and (d < today or (d == today and te <= now_t)):
+            box = unmarked
+        elif stt == LessonStatus.trial:
+            trial_children[cid] = min(d, trial_children.get(cid, d))
+            continue
+        else:
+            continue
+        box["count"] += 1
+        box["hours"] += dur
+        box["amount"] += prices.price(cid, d)
+    for b in (canc, unmarked):
+        b["hours"], b["amount"] = round(b["hours"], 2), r2(b["amount"])
+    out["cancelled"], out["unmarked"] = canc, unmarked
+    # пробные: сколько учеников после пробного начали заниматься
+    converted = 0
+    if trial_children:
+        later = (await db.execute(
+            select(Lesson.child_id, func.max(Lesson.date))
+            .where(Lesson.child_id.in_(list(trial_children)), Lesson.status == LessonStatus.completed)
+            .group_by(Lesson.child_id)
+        )).all()
+        converted = sum(1 for cid, d in later if d and d >= trial_children[cid])
+    out["trials"] = {"count": sum(1 for r in rows if r[4] == LessonStatus.trial),
+                     "children": len(trial_children), "converted": converted}
+    # ученики: занимались в этом месяце, новые, не занимались (были в прошлом месяце)
+    cur = set(facts.get("children") or [])
+    ps, pe = _month_bounds(f"{(start - timedelta(days=1)):%Y-%m}")
+    prev = {c for (c,) in (await db.execute(
+        select(Lesson.child_id).where(Lesson.status == LessonStatus.completed, Lesson.date >= ps, Lesson.date <= pe)
+        .distinct()
+    )).all()}
+    first = dict((await db.execute(
+        select(Lesson.child_id, func.min(Lesson.date))
+        .where(Lesson.child_id.in_(list(cur)), Lesson.status == LessonStatus.completed)
+        .group_by(Lesson.child_id)
+    )).all()) if cur else {}
+    out["students"] = {"active": len(cur), "prev_active": len(prev),
+                       "new": sum(1 for c in cur if first.get(c) and first[c] >= start),
+                       "gone": len(prev - cur)}
+    # долг клиентов и оплачено вперёд — на сегодня (как в «Аналитике» → «Деньги»)
+    try:
+        from app.services.finance_report import compute_finance_rows
+        debt = ahead = 0.0
+        for r in await compute_finance_rows(db):
+            dv = float(r.debt or 0)
+            if dv > 0.009:
+                debt += dv
+            extra = max(0, (r.lessons_paid or 0) - (r.lessons_conducted or 0))
+            if extra > 0 and float(r.lesson_price or 0) > 0:
+                ahead += extra * float(r.lesson_price)
+        out["debt_now"], out["ahead_now"] = r2(debt), r2(ahead)
+    except Exception:  # отчёт по оплатам не должен ломать бюджет
+        logger.exception("budget: finance rows failed")
+        out["debt_now"] = out["ahead_now"] = None
+    return out
 
 
 def _inputs(facts: dict, st: BudgetSettings, month: str) -> dict:
@@ -626,6 +719,7 @@ async def budget_report(month: Optional[str] = Query(None), db: AsyncSession = D
     st = await _load_settings(db, u.dk)
     facts = await _month_facts(db, month)
     res = compute(_inputs(facts, st, month))
+    life = await _month_life(db, month, facts)
     # динамика за 6 месяцев (по сохранённым настройкам каждого месяца)
     y, m = int(month[:4]), int(month[5:7])
     trend = []
@@ -636,13 +730,15 @@ async def budget_report(month: Optional[str] = Query(None), db: AsyncSession = D
             continue
         f = facts if key == month else await _month_facts(db, key)
         r = res if key == month else compute(_inputs(f, st, key), with_extras=False)
+        tt_ = r["totals"]
         trend.append({"month": key, "revenue": r["revenue"], "profit": r["profit"], "chp": r["chp"],
+                      "tutors_cost": r["tutors_cost"], "staff_cost": r["staff_cost"], "taxes": tt_["taxes_all"],
                       "hours": r["hours"], "chp_per_hour": r["chp_per_hour"], "partial": f["partial"],
                       "filled": key in st.months})
     flags_missing = [t["name"] for t in facts["tutors"] if not st.tutors.get(str(t["id"]))]
     return {"month": month, "start_month": BUDGET_START, "start": facts["start"], "end": facts["end"], "partial": facts["partial"],
             "filled": month in st.months, "flags_missing": flags_missing,
-            "month_values": _month_vals(st, month).model_dump(), **res, "trend": trend}
+            "month_values": _month_vals(st, month).model_dump(), **res, "trend": trend, "life": life}
 
 
 @router.get("/audit")

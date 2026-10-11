@@ -22,17 +22,27 @@ SOON_DAYS = 30
 def contract_status(action: Optional[str], end: Optional[date], today: date) -> dict:
     """Статус договора по действию и дате окончания.
     • «Расторгнуть» — «Нужно расторгнуть»;
-    • дата окончания не наступила — «Действует» (за 30 дней — с пометкой, что скоро истекает);
-    • дата прошла — «Истёк»;
-    • даты нет — «Нет договора»."""
+    • есть дата окончания: не наступила — «Действует» (за 30 дней — «скоро
+      истекает»), прошла — «Истёк»;
+    • даты нет: «Активный — ничего не нужно» — «Действует» (бессрочно / дата
+      не указана), «Продлить» — «Нужно продлить», «Заключить» — «Нужно
+      заключить», «Пока не нужен» — «Не нужен», ничего не выбрано — «Нет договора»."""
     if action == "Расторгнуть":
         return {"status": "Нужно расторгнуть", "tone": "red", "days_left": (end - today).days if end else None}
-    if end is None:
-        return {"status": "Нет договора", "tone": "amber", "days_left": None}
-    left = (end - today).days
-    if left < 0:
-        return {"status": "Истёк", "tone": "red", "days_left": left}
-    return {"status": "Действует", "tone": "green" if left > SOON_DAYS else "soon", "days_left": left}
+    if end is not None:
+        left = (end - today).days
+        if left < 0:
+            return {"status": "Истёк", "tone": "red", "days_left": left}
+        return {"status": "Действует", "tone": "green" if left > SOON_DAYS else "soon", "days_left": left}
+    if action == ACTIONS[0]:
+        return {"status": "Действует", "tone": "green", "days_left": None, "no_end": True}
+    if action == "Продлить":
+        return {"status": "Нужно продлить", "tone": "amber", "days_left": None}
+    if action == "Заключить":
+        return {"status": "Нужно заключить", "tone": "amber", "days_left": None}
+    if action == "Пока не нужен":
+        return {"status": "Не нужен", "tone": "grey", "days_left": None}
+    return {"status": "Нет договора", "tone": "amber", "days_left": None}
 
 
 def _row(tid, ln, fn, active, subjects, info: Optional[TutorContractInfo], today: date) -> dict:
@@ -57,7 +67,9 @@ async def tutor_board(include_inactive: bool = Query(False), db: AsyncSession = 
         if name and name not in subj.setdefault(tid, []):
             subj[tid].append(name)
     infos = {x.tutor_id: x for x in (await db.execute(select(TutorContractInfo))).scalars().all()}
-    q = select(TutorProfile.id, User.last_name, User.first_name, User.is_active).join(User, User.id == TutorProfile.user_id)
+    q = (select(TutorProfile.id, User.last_name, User.first_name, User.is_active)
+         .join(User, User.id == TutorProfile.user_id)
+         .where(TutorProfile.archived_at.is_(None)))  # удалённые (архив) в договорах не показываются
     if not include_inactive:
         q = q.where(User.is_active.isnot(False))
     rows = [_row(tid, ln, fn, act, subj.get(tid, []), infos.get(tid), today)

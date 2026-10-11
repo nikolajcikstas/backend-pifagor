@@ -85,3 +85,21 @@ def test_belgosstrakh_in_cost():
     x = payroll(892, True, True, c)
     assert x["belgosstrakh"] == r2(0.006 * x["gross"])
     assert x["cost"] == r2(x["gross"] + x["fszn"] + x["belgosstrakh"])
+
+
+def test_structure_parts_sum_to_revenue_and_contribution():
+    """Части «куда уходит выручка» в сумме дают выручку; вклад репетитора =
+    выручка его занятий − УСН и EasyPay с неё − его стоимость с налогами."""
+    res = compute({"revenue": 5000, "hours": 100, "lessons": 100,
+                   "tutors": [{"id": 1, "name": "A", "net": 1500, "formal": True, "deduction": True, "revenue": 3000},
+                              {"id": 2, "name": "B", "net": 900, "formal": False, "deduction": False, "revenue": 2000}],
+                   "staff": [{"id": "s", "name": "M", "net": 600, "formal": True, "deduction": False}],
+                   "month": {"advertising": 200, "fund": 0, "next_month": 300}})
+    T = res["totals"]
+    people = sum(x.get("net_check", x["net"]) if x["formal"] else x["net"] for x in res["tutors"] + res["staff"])
+    parts = people + res["accountant"] + res["advertising"] + res["easypay"] + T["taxes_all"] + res["chp"]
+    assert abs(parts - 5000) < 0.02, parts
+    a = res["tutors"][0]
+    assert a["contribution"] == r2(3000 - 3000 * 0.072 - a["cost"])
+    # налог на вывод: неоформленный B + реклама + следующий месяц
+    assert T["withdraw_tax"] == r2(res["tutors"][1]["withdraw_tax"] + r2(200 * 13 / 87) + r2(300 * 13 / 87))

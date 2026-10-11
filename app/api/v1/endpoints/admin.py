@@ -19,7 +19,10 @@ from app.core.deps import require_admin
 from app.core.security import get_password_hash
 from app.services.contract_parser import parse_contract_docx
 from app.services.email_parser import _find_child_by_payer_name, _normalize_name
-from app.services.tutor_earnings import compute_tutor_earnings, get_current_and_pending_rate
+from app.services.tutor_earnings import (
+    compute_earnings_bulk, compute_tutor_earnings, current_and_pending_from_history,
+    get_current_and_pending_rate, load_rate_histories,
+)
 from app.models.models import (
     InviteCode, RoleEnum, Lesson, LessonStatus, Notification,
     ChildProfile, User, EmailReceipt, ParentProfile, ParentChild,  # 🌟 Добавили профили
@@ -1240,6 +1243,7 @@ async def _tutor_earnings_map(
     db: AsyncSession,
     tutor_ids: List[int],
     as_of: Optional[date] = None,
+    histories: Optional[dict] = None,
 ) -> dict[int, float]:
     """Сколько должны каждому репетитору: (проведённые занятия * ставка,
     действовавшая на дату каждого занятия) - уже выплачено.
@@ -1248,10 +1252,7 @@ async def _tutor_earnings_map(
     if not tutor_ids:
         return {}
 
-    earned_by_tutor: dict[int, float] = {}
-    for tutor_id in tutor_ids:
-        total_earned, _count = await compute_tutor_earnings(db, tutor_id, as_of_date=as_of)
-        earned_by_tutor[tutor_id] = total_earned
+    earned_by_tutor = await compute_earnings_bulk(db, list(tutor_ids), as_of_date=as_of, histories=histories)
 
     paid_res = await db.execute(
         select(TutorPayout.tutor_id, func.sum(TutorPayout.amount))
@@ -1281,14 +1282,22 @@ async def list_admin_tutors(db: AsyncSession = Depends(get_db)):
         .order_by(TutorProfile.id)
     )
     tutors = result.unique().scalars().all()
-    earnings_map = await _tutor_earnings_map(db, [t.id for t in tutors])
-    rows = []
+    # Всё одним набором запросов, а не по 4 запроса на каждого репетитора.
+    histories = await load_rate_histories(db, [t.id for t in tutors])
+    rates = {t.id: current_and_pending_from_history(histories.get(t.id) or [], t.rate_per_hour) for t in tutors}
+    changed = False
     for t in tutors:
-        _cur, pending, pending_from = await get_current_and_pending_rate(db, t.id, t.rate_per_hour)
+        _cur = rates[t.id][0]
         if _cur is not None and t.rate_per_hour != _cur:
             # запланированная ставка вступила в силу — обновляем поле в карточке
             t.rate_per_hour = _cur
-            await db.commit()
+            changed = True
+    if changed:
+        await db.commit()
+    earnings_map = await _tutor_earnings_map(db, [t.id for t in tutors], histories=histories)
+    rows = []
+    for t in tutors:
+        _cur, pending, pending_from = rates[t.id]
         rows.append(_serialize_tutor(
             t, earnings=earnings_map.get(t.id, 0.0),
             pending_rate=pending, pending_rate_from=pending_from,

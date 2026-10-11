@@ -1104,6 +1104,8 @@ async def people_state(db: AsyncSession = Depends(get_db)):
     tutors = (await db.execute(
         select(TutorProfile.id, User.last_name, User.first_name, User.is_active)
         .join(User, User.id == TutorProfile.user_id)
+        # репетиторы в архиве с расчётом закрыты — их остаток в «должны» не идёт
+        .where(TutorProfile.archived_at.is_(None))
     )).all()
     owed = await _tutor_earnings_map(db, [t[0] for t in tutors])
     last_paid = dict((await db.execute(

@@ -58,6 +58,78 @@ async def compute_tutor_earnings(
     return round(total, 2), len(lesson_dates)
 
 
+def _rate_on(history: list, flat_rate: float, d: DateType) -> float:
+    """Ставка на дату: та же логика, что в compute_tutor_earnings."""
+    if not history:
+        return flat_rate
+    applicable = history[0][1]
+    for eff, rate in history:
+        if eff <= d:
+            applicable = rate
+        else:
+            break
+    return applicable
+
+
+async def load_rate_histories(db: AsyncSession, tutor_ids: list) -> dict:
+    """История ставок сразу для многих репетиторов одним запросом:
+    {tutor_id: [(effective_from, rate), ...]} по возрастанию даты."""
+    out: dict = {}
+    if not tutor_ids:
+        return out
+    for tid, eff, rate in (await db.execute(
+        select(TutorRateHistory.tutor_id, TutorRateHistory.effective_from, TutorRateHistory.rate_per_hour)
+        .where(TutorRateHistory.tutor_id.in_(tutor_ids))
+        .order_by(TutorRateHistory.tutor_id, TutorRateHistory.effective_from, TutorRateHistory.id)
+    )).all():
+        out.setdefault(tid, []).append((eff, rate))
+    return out
+
+
+async def compute_earnings_bulk(
+    db: AsyncSession,
+    tutor_ids: list,
+    as_of_date: Optional[DateType] = None,
+    histories: Optional[dict] = None,
+) -> dict:
+    """То же, что compute_tutor_earnings, но для всех репетиторов сразу —
+    три запроса вместо трёх на каждого (на сервере это давало долгую загрузку
+    вкладки «Репетиторы»). Возвращает {tutor_id: заработано}."""
+    if not tutor_ids:
+        return {}
+    from sqlalchemy import func as _f
+    if histories is None:
+        histories = await load_rate_histories(db, tutor_ids)
+    flat = {tid: (rate or 0) for tid, rate in (await db.execute(
+        select(TutorProfile.id, TutorProfile.rate_per_hour).where(TutorProfile.id.in_(tutor_ids))
+    )).all()}
+    filters = [Lesson.tutor_id.in_(tutor_ids), Lesson.status == LessonStatus.completed]
+    if as_of_date is not None:
+        filters.append(Lesson.date <= as_of_date)
+    totals = {tid: 0.0 for tid in tutor_ids}
+    for tid, d, n in (await db.execute(
+        select(Lesson.tutor_id, Lesson.date, _f.count()).where(*filters).group_by(Lesson.tutor_id, Lesson.date)
+    )).all():
+        totals[tid] = totals.get(tid, 0.0) + _rate_on(histories.get(tid) or [], flat.get(tid, 0), d) * n
+    return {tid: round(v, 2) for tid, v in totals.items()}
+
+
+def current_and_pending_from_history(history: list, fallback_rate: Optional[float]):
+    """Как get_current_and_pending_rate, но по уже загруженной истории."""
+    if not history:
+        return fallback_rate, None, None
+    today = minsk_today()
+    current = pending = pending_from = None
+    for eff, rate in history:
+        if eff <= today:
+            current = rate
+        elif pending is None:
+            pending, pending_from = rate, eff
+    if current is None:
+        current = history[0][1]
+    return current, pending, pending_from
+
+
 async def get_current_and_pending_rate(
     db: AsyncSession,
     tutor_id: int,
