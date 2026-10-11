@@ -267,6 +267,8 @@ async def _init_database_schema() -> bool:
                     # учёт посещений личного кабинета: время на вкладках
                     "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS page VARCHAR(20)",
                     "ALTER TABLE lk_events ADD COLUMN IF NOT EXISTS seconds INTEGER",
+                    # архив репетиторов (удаление без потери истории)
+                    "ALTER TABLE tutor_profiles ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
                     # дробный план «в неделю» (0.5 — раз в 2 недели); меняем тип один раз
                     "DO $$ BEGIN IF (SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() "
                     "AND table_name = 'child_profiles' AND column_name = 'lessons_per_week') = 'integer' THEN "

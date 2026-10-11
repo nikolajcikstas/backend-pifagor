@@ -1277,6 +1277,7 @@ async def list_admin_tutors(db: AsyncSession = Depends(get_db)):
             joinedload(TutorProfile.user),
             joinedload(TutorProfile.subjects).joinedload(TutorSubject.subject),
         )
+        .where(TutorProfile.archived_at.is_(None))  # архив — отдельным списком
         .order_by(TutorProfile.id)
     )
     tutors = result.unique().scalars().all()
@@ -1494,51 +1495,71 @@ async def pay_admin_tutor(
 
 @router.delete("/tutors/{tutor_id}", status_code=204, dependencies=[Depends(require_admin)])
 async def delete_admin_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TutorProfile).where(TutorProfile.id == tutor_id))
-    tutor = result.scalar_one_or_none()
-    user_id = tutor.user_id if tutor else None
+    """«Удалить» репетитора = перенести в архив.
+    • Удаляются только его будущие запланированные занятия (и ДЗ к ним).
+    • Прошлые занятия, отчёты, ДЗ, оплаты родителей, выплаты и ставки
+      репетитора остаются как были — с его именем у родителей и учеников,
+      в аналитике, частотности и бюджете ничего не меняется.
+    • Войти он больше не может, в списках репетиторов и при создании
+      занятий не показывается, с сайта снимается. Можно восстановить."""
+    from datetime import datetime as _dt
+    from app.services.pricing import minsk_today
+    tutor = await db.scalar(select(TutorProfile).where(TutorProfile.id == tutor_id))
     if not tutor:
         raise HTTPException(status_code=404, detail=f"Репетитор с ID {tutor_id} не найден")
-
-    lessons = await db.execute(select(Lesson).where(Lesson.tutor_id == tutor_id))
-    for lesson in lessons.scalars().all():
-        hws = await db.execute(select(Homework).where(Homework.lesson_id == lesson.id))
-        for hw in hws.scalars().all():
+    today = minsk_today()
+    now_t = (_dt.utcnow() + timedelta(hours=3)).time()
+    future = (await db.execute(
+        select(Lesson).where(
+            Lesson.tutor_id == tutor_id,
+            Lesson.status == LessonStatus.scheduled,
+            or_(Lesson.date > today, (Lesson.date == today) & (Lesson.time_start > now_t)),
+        )
+    )).scalars().all()
+    for lesson in future:
+        for hw in (await db.execute(select(Homework).where(Homework.lesson_id == lesson.id))).scalars().all():
             await db.delete(hw)
+        for rpt in (await db.execute(select(Report).where(Report.lesson_id == lesson.id))).scalars().all():
+            rpt.lesson_id = None  # отчёт сохраняем, просто без привязки к удалённому занятию
         await db.delete(lesson)
-
-    # Удаляем зависимые записи, чтобы не упереться в внешние ключи
-    subj_links = await db.execute(select(TutorSubject).where(TutorSubject.tutor_id == tutor_id))
-    for link in subj_links.scalars().all():
-        await db.delete(link)
-
-    docs = await db.execute(select(TutorDocument).where(TutorDocument.tutor_id == tutor_id))
-    for doc in docs.scalars().all():
-        await db.delete(doc)
-
-    for model, field in (
-        (TutorContract, TutorContract.tutor_id),
-        (Report, Report.tutor_id),
-        (Comment, Comment.tutor_id),
-        (Act, Act.tutor_id),
-        (Review, Review.tutor_id),
-    ):
-        rows = await db.execute(select(model).where(field == tutor_id))
-        for row in rows.scalars().all():
-            await db.delete(row)
-
-    if user_id:
-        await _delete_invite_codes_for_user(db, user_id)
-        notifications = await db.execute(select(Notification).where(Notification.user_id == user_id))
-        for notification in notifications.scalars().all():
-            await db.delete(notification)
-
-    user = await db.get(User, user_id) if user_id else None
-    await db.delete(tutor)
+    tutor.archived_at = _dt.utcnow()
+    tutor.is_published = False
+    user = await db.get(User, tutor.user_id) if tutor.user_id else None
     if user:
-        await db.delete(user)
+        user.is_active = False
     await db.commit()
     return None
+
+
+@router.get("/tutors/archived", dependencies=[Depends(require_admin)])
+async def list_archived_tutors(db: AsyncSession = Depends(get_db)):
+    """Архив репетиторов: кто, когда перенесён, сколько прошлых занятий и сколько ему ещё должны."""
+    rows = (await db.execute(
+        select(TutorProfile.id, User.last_name, User.first_name, TutorProfile.archived_at)
+        .join(User, User.id == TutorProfile.user_id)
+        .where(TutorProfile.archived_at.isnot(None))
+        .order_by(TutorProfile.archived_at.desc())
+    )).all()
+    ids = [r[0] for r in rows]
+    owed = await _tutor_earnings_map(db, ids) if ids else {}
+    counts = dict((await db.execute(
+        select(Lesson.tutor_id, func.count(Lesson.id)).where(Lesson.tutor_id.in_(ids or [0])).group_by(Lesson.tutor_id)
+    )).all())
+    return [{"id": tid, "name": f"{ln or ''} {fn or ''}".strip(), "archived_at": at.isoformat() + "Z" if at else None,
+             "lessons": int(counts.get(tid, 0)), "owed": round(float(owed.get(tid, 0.0)), 2)} for tid, ln, fn, at in rows]
+
+
+@router.post("/tutors/{tutor_id}/restore", dependencies=[Depends(require_admin)])
+async def restore_archived_tutor(tutor_id: int, db: AsyncSession = Depends(get_db)):
+    tutor = await db.scalar(select(TutorProfile).where(TutorProfile.id == tutor_id))
+    if not tutor:
+        raise HTTPException(status_code=404, detail="Репетитор не найден")
+    tutor.archived_at = None
+    user = await db.get(User, tutor.user_id) if tutor.user_id else None
+    if user:
+        user.is_active = True
+    await db.commit()
+    return {"ok": True}
 
 
 @router.delete("/students/{user_id}", status_code=204, dependencies=[Depends(require_admin)])

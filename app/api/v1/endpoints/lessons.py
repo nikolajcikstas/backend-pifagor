@@ -296,6 +296,8 @@ async def create_lesson(
     tutor = await db.scalar(select(TutorProfile).where(TutorProfile.id == data.tutor_id).options(joinedload(TutorProfile.user)))
     if not tutor:
         raise HTTPException(status_code=422, detail=f"Репетитор с профилем id={data.tutor_id} не найден")
+    if tutor.archived_at is not None:
+        raise HTTPException(status_code=400, detail="Репетитор в архиве — новые занятия ему назначать нельзя")
 
     child = await db.scalar(select(ChildProfile).where(ChildProfile.id == data.child_id).options(joinedload(ChildProfile.user)))
     if not child:
@@ -462,6 +464,9 @@ async def update_lesson(
 
     if "tutor_id" in updates and not await db.scalar(select(TutorProfile.id).where(TutorProfile.id == updates["tutor_id"])):
         raise HTTPException(status_code=422, detail=f"Tutor profile id={updates['tutor_id']} not found")
+    if "tutor_id" in updates and updates["tutor_id"] != lesson.tutor_id and await db.scalar(
+            select(TutorProfile.archived_at).where(TutorProfile.id == updates["tutor_id"])):
+        raise HTTPException(status_code=400, detail="Репетитор в архиве — занятия ему переназначать нельзя")
     if "child_id" in updates and not await db.scalar(select(ChildProfile.id).where(ChildProfile.id == updates["child_id"])):
         raise HTTPException(status_code=422, detail=f"Child profile id={updates['child_id']} not found")
     if "subject_id" in updates and not await db.scalar(select(Subject.id).where(Subject.id == updates["subject_id"])):

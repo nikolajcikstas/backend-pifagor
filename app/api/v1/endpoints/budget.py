@@ -608,12 +608,15 @@ async def put_budget_flag(body: FlagIn, request: Request, db: AsyncSession = Dep
     return {"ok": True}
 
 
+# Бюджет считаем с октября 2026: более ранние месяцы не показываются.
+BUDGET_START = "2026-10"
+
+
 def _month_ok(month: Optional[str]) -> str:
-    if month and re.fullmatch(r"20\d\d-(0[1-9]|1[0-2])", month):
-        return month
     t = minsk_today()
-    prev = date(t.year, t.month, 1) - timedelta(days=1)
-    return f"{prev.year:04d}-{prev.month:02d}"
+    if not (month and re.fullmatch(r"20\d\d-(0[1-9]|1[0-2])", month)):
+        month = f"{t.year:04d}-{t.month:02d}"
+    return max(month, BUDGET_START)
 
 
 @router.get("/report")
@@ -629,13 +632,15 @@ async def budget_report(month: Optional[str] = Query(None), db: AsyncSession = D
     for k in range(5, -1, -1):
         mm = (y * 12 + m - 1) - k
         key = f"{mm // 12:04d}-{mm % 12 + 1:02d}"
+        if key < BUDGET_START:
+            continue
         f = facts if key == month else await _month_facts(db, key)
         r = res if key == month else compute(_inputs(f, st, key), with_extras=False)
         trend.append({"month": key, "revenue": r["revenue"], "profit": r["profit"], "chp": r["chp"],
                       "hours": r["hours"], "chp_per_hour": r["chp_per_hour"], "partial": f["partial"],
                       "filled": key in st.months})
     flags_missing = [t["name"] for t in facts["tutors"] if not st.tutors.get(str(t["id"]))]
-    return {"month": month, "start": facts["start"], "end": facts["end"], "partial": facts["partial"],
+    return {"month": month, "start_month": BUDGET_START, "start": facts["start"], "end": facts["end"], "partial": facts["partial"],
             "filled": month in st.months, "flags_missing": flags_missing,
             "month_values": _month_vals(st, month).model_dump(), **res, "trend": trend}
 

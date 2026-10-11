@@ -6,17 +6,20 @@
 бухгалтера за сентябрь 2026 сходятся до копейки).
 
 Правила (Республика Беларусь, 2026):
-• Подоходный налог 13% удерживается из начисленной зарплаты; база — начислено
-  минус стандартный вычет (216 р в месяц, если доход за месяц не больше
-  1 308 р и вычет применяется у этого работодателя).
-• Взносы в ФСЗН: 34% платит организация сверху, 1% удерживается из зарплаты
-  работника. База — всё начисленное, вычет её не уменьшает (за сентябрь:
-  35% × 7 075,65 = 2 476,48 — ровно сумма, которую заплатили).
+• Человек получает на карту ровно заработанное; все налоги и взносы — расход
+  организации. Бухгалтер начисляет сумму G так, чтобы после подоходного 13%
+  (с G минус стандартный вычет 216 р, если доход за месяц не больше 1 308 р)
+  и 1% в ФСЗН на карту пришло заработанное.
+• Взносы в ФСЗН: 34% + 1% от всего начисленного (вычет базу не уменьшает),
+  Белгосстрах — 0,6% от начисленного.
 • Неоформленному человеку выплата идёт из выведенных средств: чтобы на руки
   пришло N, выводится N / 0,87, налог — N × 0,13 / 0,87.
 
-ЧП = выручка − все расходы и налоги (включая налог 13/87 на вывод денег
-«на следующий месяц»). Фонд и сумма «на следующий месяц» — распределение ЧП:
+• Реклама оплачивается с личной карты: деньги выводятся со счёта, подоходный
+  налог на вывод — реклама × 0,13 / 0,87.
+
+ЧП = выручка − все расходы и налоги (включая подоходный налог на вывод денег
+на рекламу и «на следующий месяц»). Фонд и сумма «на следующий месяц» — распределение ЧП:
 что остаётся после них — «свободный остаток».
 
 Точка безубыточности — классический анализ «затраты — объём — прибыль»
@@ -49,6 +52,10 @@ def r2(x: float) -> float:
     return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _pct(x: float) -> str:
+    return f"{x:g}".replace(".", ",") + "%"
+
+
 def consts_of(c: Optional[dict]) -> dict:
     out = dict(DEFAULT_CONSTS)
     for k, v in (c or {}).items():
@@ -79,7 +86,7 @@ def payroll(net: float, formal: bool, deduction: bool, c: dict) -> dict:
         tax = r2(net * it / (1 - it))
         return {**base, "gross": r2(net + tax), "income_tax": 0.0, "pension": 0.0, "fszn": 0.0, "belgosstrakh": 0.0,
                 "withdraw_tax": tax, "cost": r2(net + tax), "deduction_applied": 0.0,
-                "note": "не оформлен: выводится на руки, налог 13/87"}
+                "note": "не оформлен: выплата из выведенных средств, подоходный налог на вывод"}
 
     def gross_for(d: float) -> float:
         g = net / (1 - p)
@@ -139,15 +146,18 @@ def compute(data: dict, with_extras: bool = True) -> dict:
     easypay = r2(R * c["easypay_pct"] / 100)
     acc = r2(c["accountant"])
     next_tax = r2(nxt * it / (1 - it))
-    # ЧП = выручка − все расходы (вместе с налогом 13/87 на вывод «следующего месяца»).
+    # Реклама оплачивается с личной карты — деньги на неё выводятся со счёта.
+    adv_tax = r2(adv * it / (1 - it))
+    # ЧП = выручка − все расходы (вместе с подоходным налогом на вывод денег
+    # на рекламу и «на следующий месяц»).
     # Фонд и сам «следующий месяц» — это распределение уже полученного ЧП.
-    chp = r2(R - usn - easypay - acc - adv - tutors_cost - staff_cost - next_tax)
+    chp = r2(R - usn - easypay - acc - adv - adv_tax - tutors_cost - staff_cost - next_tax)
     rest = r2(chp - fund - nxt)
 
     out: dict[str, Any] = {
         "consts": c,
         "revenue": r2(R), "hours": round(H, 2), "lessons": L,
-        "usn": usn, "easypay": easypay, "accountant": acc, "advertising": r2(adv),
+        "usn": usn, "easypay": easypay, "accountant": acc, "advertising": r2(adv), "advertising_tax": adv_tax,
         "tutors": tut, "staff": stf,
         "tutors_cost": tutors_cost, "staff_cost": staff_cost,
         "profit": chp, "fund": r2(fund), "next_month": r2(nxt), "next_month_tax": next_tax,
@@ -162,22 +172,22 @@ def compute(data: dict, with_extras: bool = True) -> dict:
             "fszn": r2(tot(tut, "fszn") + tot(stf, "fszn")),
             "fszn_with_pension": r2(tot(tut, "fszn") + tot(stf, "fszn") + tot(tut, "pension") + tot(stf, "pension")),
             "belgosstrakh": r2(tot(tut, "belgosstrakh") + tot(stf, "belgosstrakh")),
-            "withdraw_tax": r2(tot(tut, "withdraw_tax") + tot(stf, "withdraw_tax") + next_tax),
+            "withdraw_tax": r2(tot(tut, "withdraw_tax") + tot(stf, "withdraw_tax") + adv_tax + next_tax),
         },
     }
     out["waterfall"] = [
         {"key": "revenue", "label": "Выручка", "value": r2(R), "kind": "total"},
-        {"key": "tutors", "label": "Репетиторы (с налогами)", "value": -tutors_cost, "kind": "minus"},
-        {"key": "usn", "label": f"УСН {c['usn_pct']:g}%", "value": -usn, "kind": "minus"},
-        {"key": "easypay", "label": f"EasyPay {c['easypay_pct']:g}%", "value": -easypay, "kind": "minus"},
-        {"key": "staff", "label": "Сотрудники (с налогами)", "value": -staff_cost, "kind": "minus"},
+        {"key": "tutors", "label": "Репетиторы\n(с налогами)", "value": -tutors_cost, "kind": "minus"},
+        {"key": "usn", "label": f"УСН\n{_pct(c['usn_pct'])}", "value": -usn, "kind": "minus"},
+        {"key": "easypay", "label": f"EasyPay\n{_pct(c['easypay_pct'])}", "value": -easypay, "kind": "minus"},
+        {"key": "staff", "label": "Сотрудники\n(с налогами)", "value": -staff_cost, "kind": "minus"},
         {"key": "accountant", "label": "Бухгалтер", "value": -acc, "kind": "minus"},
         {"key": "advertising", "label": "Реклама", "value": -r2(adv), "kind": "minus"},
-        {"key": "next_tax", "label": "Налог 13/87 на вывод", "value": -next_tax, "kind": "minus"},
+        {"key": "next_tax", "label": "Подоходный налог\nна вывод", "value": -r2(adv_tax + next_tax), "kind": "minus"},
         {"key": "chp", "label": "ЧП", "value": chp, "kind": "total"},
         {"key": "fund", "label": "В фонд", "value": -r2(fund), "kind": "minus"},
-        {"key": "next", "label": "На следующий месяц", "value": -r2(nxt), "kind": "minus"},
-        {"key": "rest", "label": "Свободный остаток", "value": rest, "kind": "total"},
+        {"key": "next", "label": "На следующий\nмесяц", "value": -r2(nxt), "kind": "minus"},
+        {"key": "rest", "label": "Свободный\nостаток", "value": rest, "kind": "total"},
     ]
 
     # Безубыточность (CVP): выручка и зарплата репетиторов растут вместе с часами,
@@ -188,7 +198,7 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         rev_h = R / H
         tutor_h = tutors_cost / H
         margin_h = rev_h * (1 - var_share) - tutor_h
-        fixed = acc + adv + staff_cost + next_tax
+        fixed = acc + adv + adv_tax + staff_cost + next_tax
         alloc = fund + nxt
         be = {
             "available": True,
@@ -200,8 +210,8 @@ def compute(data: dict, with_extras: bool = True) -> dict:
             h0 = fixed / margin_h
             h1 = (fixed + alloc) / margin_h
             be.update({
-                "hours_breakeven": round(h0, 1),
-                "hours_target": round(h1, 1),
+                "hours_breakeven": round(h0, 2),
+                "hours_target": round(h1, 2),
                 "safety_pct": round(100 * (H - h0) / H, 1),
                 "operating_leverage": round(margin_h * H / chp, 2) if abs(chp) > 0.01 else None,
             })

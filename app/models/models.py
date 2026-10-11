@@ -77,6 +77,9 @@ class TutorProfile(Base):
     experience_years: Mapped[Optional[int]] = mapped_column(Integer)
     rate_per_hour: Mapped[Optional[float]] = mapped_column(Float)
     is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    # «Удалён» во вкладке «Репетиторы» = перенесён в архив: прошлые занятия,
+    # отчёты, ДЗ и оплаты остаются, войти и получить новые занятия нельзя
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     user: Mapped["User"] = relationship(back_populates="tutor_profile")
     subjects: Mapped[List["TutorSubject"]] = relationship(back_populates="tutor")

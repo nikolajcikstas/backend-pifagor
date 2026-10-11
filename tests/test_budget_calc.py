@@ -54,9 +54,11 @@ def test_informal_and_chp():
     res = compute({"revenue": 10000, "hours": 200, "lessons": 200,
                    "tutors": [{"id": 1, "name": "A", "net": 3000, "formal": True, "deduction": True}],
                    "staff": [], "month": {"advertising": 100, "fund": 500, "next_month": 870}})
-    # ЧП = 10000 − УСН 600 − EasyPay 120 − бухгалтер 450 − реклама 100 − репетитор − налог на вывод 130
+    # ЧП = 10000 − УСН 600 − EasyPay 120 − бухгалтер 450 − реклама 100 − налог на вывод на рекламу
+    #      − репетитор − налог на вывод «следующего месяца» 130
     t = res["tutors"][0]
-    assert res["chp"] == r2(10000 - 600 - 120 - 450 - 100 - t["cost"] - 130)
+    assert res["advertising_tax"] == r2(100 * 13 / 87) == 14.94
+    assert res["chp"] == r2(10000 - 600 - 120 - 450 - 100 - 14.94 - t["cost"] - 130)
     # свободный остаток = ЧП − фонд − следующий месяц
     assert res["rest"] == r2(res["chp"] - 500 - 870)
     be = res["breakeven"]
