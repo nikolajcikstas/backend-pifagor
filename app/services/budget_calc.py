@@ -23,7 +23,8 @@
 что остаётся после них — «свободный остаток».
 
 Точка безубыточности — классический анализ «затраты — объём — прибыль»
-(CVP): часы = постоянные расходы ÷ маржинальный доход на час
+(CVP) в занятиях: занятия = постоянные расходы ÷ маржинальный доход занятия
+(цена клиента и ставка репетитора — за занятие, часы не учитываются)
 (Horngren, Datar, Rajan. Cost Accounting: A Managerial Emphasis, гл. 3;
 Drury. Management and Cost Accounting, гл. 8).
 Чувствительность — изменение по одному параметру на ±10% при прочих равных
@@ -123,7 +124,7 @@ def compute(data: dict, with_extras: bool = True) -> dict:
     m = data.get("month") or {}
     R = float(data.get("revenue") or 0)
     H = float(data.get("hours") or 0)
-    L = int(data.get("lessons") or 0)
+    L = float(data.get("lessons") or 0)
     adv = float(m.get("advertising") or 0)
     fund = float(m.get("fund") or 0)
     nxt = float(m.get("next_month") or 0)
@@ -162,14 +163,16 @@ def compute(data: dict, with_extras: bool = True) -> dict:
 
     out: dict[str, Any] = {
         "consts": c,
-        "revenue": r2(R), "hours": round(H, 2), "lessons": L,
+        "revenue": r2(R), "hours": round(H, 2), "lessons": int(round(L)),
         "usn": usn, "easypay": easypay, "accountant": acc, "advertising": r2(adv), "advertising_tax": adv_tax,
         "tutors": tut, "staff": stf,
         "tutors_cost": tutors_cost, "staff_cost": staff_cost,
         "profit": chp, "fund": r2(fund), "next_month": r2(nxt), "next_month_tax": next_tax,
         "chp": chp, "rest": rest,
-        "chp_per_hour": r2(chp / H) if H > 0 else None,
-        "revenue_per_hour": r2(R / H) if H > 0 else None,
+        # всё «на занятие»: ставка репетитора и цена клиента — за занятие, часы не учитываются
+        "chp_per_lesson": r2(chp / L) if L > 0 else None,
+        "rest_per_lesson": r2(rest / L) if L > 0 else None,
+        "revenue_per_lesson": r2(R / L) if L > 0 else None,
         "totals": {
             "net_to_people": r2(tot(tut, "net") + tot(stf, "net")),
             "gross": r2(tot(tut, "gross") + tot(stf, "gross")),
@@ -199,40 +202,38 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         {"key": "rest", "label": "Свободный\nостаток", "value": rest, "kind": "total"},
     ]
 
-    # Безубыточность (CVP): выручка и зарплата репетиторов растут вместе с часами,
-    # остальное — постоянные расходы месяца.
+    # Безубыточность (CVP) в занятиях: выручка и зарплата репетиторов растут вместе
+    # с числом занятий (цена клиента и ставка — за занятие), остальное — постоянные
+    # расходы месяца.
     be: dict[str, Any] = {"available": False}
-    if H > 0 and R > 0:
+    if L > 0 and R > 0:
         var_share = (c["usn_pct"] + c["easypay_pct"]) / 100
-        rev_h = R / H
-        tutor_h = tutors_cost / H
-        margin_h = rev_h * (1 - var_share) - tutor_h
+        rev_l = R / L
+        tutor_l = tutors_cost / L
+        margin_l = rev_l * (1 - var_share) - tutor_l
         fixed = acc + adv + adv_tax + staff_cost + next_tax
         alloc = fund + nxt
         be = {
             "available": True,
-            "revenue_per_hour": r2(rev_h), "variable_per_hour": r2(rev_h * var_share + tutor_h),
-            "tutor_cost_per_hour": r2(tutor_h), "margin_per_hour": r2(margin_h),
+            "revenue_per_lesson": r2(rev_l), "variable_per_lesson": r2(rev_l * var_share + tutor_l),
+            "tutor_cost_per_lesson": r2(tutor_l), "margin_per_lesson": r2(margin_l),
             "fixed": r2(fixed), "allocations": r2(alloc),
         }
-        if margin_h > 0:
-            h0 = fixed / margin_h
-            h1 = (fixed + alloc) / margin_h
+        if margin_l > 0:
+            n0 = fixed / margin_l
+            n1 = (fixed + alloc) / margin_l
             be.update({
-                "hours_breakeven": round(h0, 2),
-                "hours_target": round(h1, 2),
-                "safety_pct": round(100 * (H - h0) / H, 1),
-                "operating_leverage": round(margin_h * H / chp, 2) if abs(chp) > 0.01 else None,
+                "lessons_breakeven": round(n0, 1),
+                "lessons_target": round(n1, 1),
+                "safety_pct": round(100 * (L - n0) / L, 1),
+                "operating_leverage": round(margin_l * L / chp, 2) if abs(chp) > 0.01 else None,
             })
-            top = max(H * 1.6, h1 * 1.25, 10)
-            pts = []
+            top = max(L * 1.6, n1 * 1.25, 10)
             steps = 24
-            for i in range(steps + 1):
-                h = top * i / steps
-                pts.append({"h": round(h, 1), "chp": r2(margin_h * h - fixed), "rest": r2(margin_h * h - fixed - alloc)})
-            be["curve"] = pts
+            be["curve"] = [{"n": round(top * i / steps, 1), "chp": r2(margin_l * top * i / steps - fixed),
+                            "rest": r2(margin_l * top * i / steps - fixed - alloc)} for i in range(steps + 1)]
         else:
-            be["note"] = "Каждый час приносит меньше, чем стоит: при этих ценах и ставках безубыточности нет."
+            be["note"] = "Каждое занятие приносит меньше, чем стоит: при этих ценах и ставках безубыточности нет."
     out["breakeven"] = be
 
     if with_extras:
@@ -248,6 +249,7 @@ def _scaled(data: dict, key: str, k: float) -> dict:
     elif key == "volume":
         d["revenue"] = float(d.get("revenue") or 0) * k
         d["hours"] = float(d.get("hours") or 0) * k
+        d["lessons"] = float(d.get("lessons") or 0) * k
         for t in d["tutors"]:
             t["net"] = float(t.get("net") or 0) * k
     elif key == "tutor_rate":
@@ -265,7 +267,7 @@ def _scaled(data: dict, key: str, k: float) -> dict:
 
 SENS_PARAMS = [
     ("price", "Цена занятия"),
-    ("volume", "Количество часов (учеников)"),
+    ("volume", "Количество занятий"),
     ("tutor_rate", "Ставки репетиторов"),
     ("staff", "Зарплаты сотрудников"),
     ("advertising", "Реклама"),

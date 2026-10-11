@@ -733,7 +733,7 @@ async def budget_report(month: Optional[str] = Query(None), db: AsyncSession = D
         tt_ = r["totals"]
         trend.append({"month": key, "revenue": r["revenue"], "profit": r["profit"], "chp": r["chp"],
                       "tutors_cost": r["tutors_cost"], "staff_cost": r["staff_cost"], "taxes": tt_["taxes_all"],
-                      "hours": r["hours"], "chp_per_hour": r["chp_per_hour"], "partial": f["partial"],
+                      "lessons": r["lessons"], "rest": r["rest"], "chp_per_lesson": r["chp_per_lesson"], "partial": f["partial"],
                       "filled": key in st.months})
     flags_missing = [t["name"] for t in facts["tutors"] if not st.tutors.get(str(t["id"]))]
     return {"month": month, "start_month": BUDGET_START, "start": facts["start"], "end": facts["end"], "partial": facts["partial"],
