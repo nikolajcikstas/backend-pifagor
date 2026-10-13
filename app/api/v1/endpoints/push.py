@@ -1,10 +1,11 @@
-"""Веб-уведомления: подписка браузера администратора и проверка.
+"""Веб-уведомления: подписка браузера и проверка.
 
-Пилот — только администраторы и только важные события; уведомление уходит
-сразу, как только событие произошло:
+Администраторы — важные события; уведомление уходит сразу, как только
+событие произошло:
 • новая заявка (с сайта или по рекомендации);
 • новый ученик в CRM;
-• ученик стал клиентом / отказ или «не занимаются»;
+• ученик стал клиентом / отказ или «не занимаются».
+Родители — напоминание о задолженности больше 160 р (app/services/debt_reminders.py).
 """
 from __future__ import annotations
 
@@ -19,9 +20,9 @@ from sqlalchemy import delete, event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.core.deps import require_admin
+from app.core.deps import require_parent
 from app.db.session import get_db
-from app.models.models import ChildProfile, PushSubscription, User
+from app.models.models import ChildProfile, PushSubscription, RoleEnum, User
 from app.services import webpush
 
 logger = logging.getLogger(__name__)
@@ -67,18 +68,18 @@ class UnsubIn(BaseModel):
 
 
 @router.get("/public-key")
-async def public_key(db: AsyncSession = Depends(get_db), _: User = Depends(require_admin)):
+async def public_key(db: AsyncSession = Depends(get_db), _: User = Depends(require_parent)):
     return {"key": await webpush.vapid_public(db)}
 
 
 @router.get("/status")
-async def status(db: AsyncSession = Depends(get_db), user: User = Depends(require_admin)):
+async def status(db: AsyncSession = Depends(get_db), user: User = Depends(require_parent)):
     n = await db.scalar(select(func.count(PushSubscription.id)).where(PushSubscription.user_id == user.id))
     return {"devices": int(n or 0)}
 
 
 @router.post("/subscribe")
-async def subscribe(body: SubIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_admin)):
+async def subscribe(body: SubIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_parent)):
     if not _endpoint_ok(body.endpoint):
         raise HTTPException(status_code=400, detail="Неизвестная служба уведомлений")
     try:  # ключ браузера должен быть настоящей точкой P-256
@@ -90,6 +91,11 @@ async def subscribe(body: SubIn, db: AsyncSession = Depends(get_db), user: User 
         raise HTTPException(status_code=400, detail="Неверные ключи подписки")
     sub = (await db.execute(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))).scalars().first()
     if sub is None:
+        # не больше 10 устройств на человека — самые старые подписки убираем
+        old = (await db.execute(select(PushSubscription.id).where(PushSubscription.user_id == user.id)
+                                .order_by(PushSubscription.id.desc()).offset(9))).scalars().all()
+        if old:
+            await db.execute(delete(PushSubscription).where(PushSubscription.id.in_(old)))
         sub = PushSubscription(endpoint=body.endpoint)
         db.add(sub)
     sub.user_id, sub.p256dh, sub.auth = user.id, body.keys.p256dh, body.keys.auth
@@ -99,7 +105,7 @@ async def subscribe(body: SubIn, db: AsyncSession = Depends(get_db), user: User 
 
 
 @router.post("/unsubscribe")
-async def unsubscribe(body: UnsubIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_admin)):
+async def unsubscribe(body: UnsubIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_parent)):
     await db.execute(delete(PushSubscription).where(PushSubscription.endpoint == body.endpoint,
                                                     PushSubscription.user_id == user.id))
     await db.commit()
@@ -107,13 +113,15 @@ async def unsubscribe(body: UnsubIn, db: AsyncSession = Depends(get_db), user: U
 
 
 @router.post("/test")
-async def test(db: AsyncSession = Depends(get_db), user: User = Depends(require_admin)):
+async def test(db: AsyncSession = Depends(get_db), user: User = Depends(require_parent)):
     subs = (await db.execute(select(PushSubscription).where(PushSubscription.user_id == user.id))).scalars().all()
     if not subs:
         raise HTTPException(status_code=400, detail="На ваших устройствах уведомления ещё не включены")
-    res = await webpush.send_to(db, subs, "Пифагор: проверка",
-                                "Уведомления работают. Сюда будут сразу приходить новые заявки, новые ученики, новые клиенты и отказы.",
-                                "/", "test")
+    if user.role == RoleEnum.parent:
+        text_ = "Уведомления работают. Сюда придёт напоминание, если накопится задолженность по оплате занятий."
+    else:
+        text_ = "Уведомления работают. Сюда будут сразу приходить новые заявки, новые ученики, новые клиенты и отказы."
+    res = await webpush.send_to(db, subs, "Пифагор: проверка", text_, "/", "test")
     return res
 
 

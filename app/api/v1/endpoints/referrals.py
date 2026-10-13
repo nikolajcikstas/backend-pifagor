@@ -107,6 +107,8 @@ async def ref_lead(code: str, body: RefLeadIn, db: AsyncSession = Depends(get_db
     phone_n = R.norm_phone(phone)
     if not phone_n or len(phone) > 30:
         raise HTTPException(status_code=400, detail="Укажите телефон полностью, например +375 29 123-45-67")
+    if await R.recent_lead(db, phone_n, body.subject_id):
+        return {"ok": True}  # повторная отправка той же заявки — второй раз не сохраняем
     referrer = await _name(db, child.id)
     referrer_parent = await _parent_name(db, child.id)
     flag = await R.lead_flag(db, child.id, phone_n, body.staff)
@@ -136,10 +138,13 @@ async def ref_lead(code: str, body: RefLeadIn, db: AsyncSession = Depends(get_db
         push_admins_later("Новая заявка по рекомендации", f"{name} · рекомендовал {referrer}", "/", f"lead-{lead.id}")
     except Exception:
         pass
-    try:
+    try:  # письмо — в фоне, чтобы сайт не ждал почту и не отправлял заявку повторно
         from app.services.email_notification import send_lead_notification
-        await asyncio.to_thread(send_lead_notification, name=name, phone=phone,
-                                subject_name=subject_name, message=lead.message)
+        from app.services.webpush import _TASKS
+        t = asyncio.get_running_loop().create_task(asyncio.to_thread(
+            send_lead_notification, name=name, phone=phone, subject_name=subject_name, message=lead.message))
+        _TASKS.add(t)
+        t.add_done_callback(_TASKS.discard)
     except Exception:
         pass
     return {"ok": True}

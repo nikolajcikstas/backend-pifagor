@@ -158,7 +158,12 @@ async def create_faq(
 
 @router.post("/requests", response_model=LeadRequestOut, status_code=201)
 async def create_lead_request(data: LeadRequestCreate, db: AsyncSession = Depends(get_db)):
-    req = LeadRequest(**data.model_dump())
+    from app.services.referrals import norm_phone, recent_lead
+    phone_n = norm_phone(data.phone)
+    dup = await recent_lead(db, phone_n, data.subject_id)
+    if dup:  # повторная отправка той же заявки — второй раз не сохраняем и не уведомляем
+        return dup
+    req = LeadRequest(**data.model_dump(), phone_norm=phone_n)
     db.add(req)
     await db.commit()
     await db.refresh(req)
@@ -175,14 +180,19 @@ async def create_lead_request(data: LeadRequestCreate, db: AsyncSession = Depend
         if subject:
             subject_name = subject.name
 
+    # Письмо отправляем в фоне: ответ сайту не ждёт почту, иначе сайт считает,
+    # что заявка не дошла, и отправляет её повторно.
     import asyncio as _asyncio
-    await _asyncio.to_thread(
+    from app.services.webpush import _TASKS
+    t = _asyncio.get_running_loop().create_task(_asyncio.to_thread(
         send_lead_notification,
         name=data.name,
         phone=data.phone,
         subject_name=subject_name,
         message=data.message or "",
-    )
+    ))
+    _TASKS.add(t)
+    t.add_done_callback(_TASKS.discard)
 
     return req
 

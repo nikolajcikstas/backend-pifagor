@@ -16,7 +16,7 @@ import secrets
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -49,6 +49,22 @@ def norm_phone(p: Optional[str]) -> Optional[str]:
     if len(digits) < 9 or set(digits[-9:]) <= {"0"}:
         return None
     return digits[-9:]
+
+
+async def recent_lead(db: AsyncSession, phone_n: Optional[str], subject_id: Optional[int],
+                      minutes: int = 15) -> Optional[LeadRequest]:
+    """Та же заявка, пришедшая повторно. Сайт сам повторяет отправку, если
+    сервер долго не отвечает (просыпается или медленно отправляет письмо), —
+    из-за этого одна заявка появлялась в CRM несколько раз. Заявка с тем же
+    телефоном и тем же предметом за последние 15 минут — это повтор."""
+    if not phone_n:
+        return None
+    q = select(LeadRequest).where(
+        LeadRequest.phone_norm == phone_n,
+        LeadRequest.subject_id.is_(None) if subject_id is None else LeadRequest.subject_id == subject_id,
+        LeadRequest.created_at >= func.now() - text(f"interval '{int(minutes)} minutes'"),
+    ).order_by(LeadRequest.id.desc()).limit(1)
+    return (await db.execute(q)).scalars().first()
 
 
 def norm_name(s: Optional[str]) -> str:
