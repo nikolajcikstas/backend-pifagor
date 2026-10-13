@@ -1,18 +1,15 @@
-"""Веб-уведомления: подписка браузера администратора, проверка, итоги дня.
+"""Веб-уведомления: подписка браузера администратора и проверка.
 
-Пилот — только администраторы и только важные события:
+Пилот — только администраторы и только важные события; уведомление уходит
+сразу, как только событие произошло:
 • новая заявка (с сайта или по рекомендации);
 • новый ученик в CRM;
 • ученик стал клиентом / отказ или «не занимаются»;
-• итоги дня в 21:00 (занятия, выручка, ученики, долг клиентов и как он
-  изменился за день).
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -24,27 +21,34 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import require_admin
 from app.db.session import get_db
-from app.models.models import (
-    AppState, ChildProfile, CrmStatusEvent, Lesson, LessonStatus, PushSubscription, RoleEnum, User,
-)
+from app.models.models import ChildProfile, PushSubscription, User
 from app.services import webpush
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/push", tags=["push"])
 
-# Сервер сам отправляет запрос на адрес подписки — разрешаем только адреса
-# настоящих служб доставки (Google/Chrome, Apple/Safari, Mozilla/Firefox, Microsoft/Edge).
-PUSH_HOSTS = ("fcm.googleapis.com", "android.googleapis.com", "push.services.mozilla.com",
-              "push.apple.com", "notify.windows.com")
+# Сервер сам отправляет запрос на адрес подписки — разрешаем только публичные
+# адреса https (не IP, не localhost и не внутренние имена). Подписываться
+# может только администратор. Служба доставки у каждого браузера своя
+# (Google — Chrome, Microsoft — Edge, Mozilla — Firefox, Apple — Safari,
+# Яндекс, Opera и др.), поэтому список служб не фиксируем.
+_BAD_SUFFIXES = (".local", ".internal", ".lan", ".localhost", ".svc", ".cluster.local")
 
 
 def _endpoint_ok(url: str) -> bool:
+    import ipaddress
     try:
         u = urlparse(url)
     except Exception:
         return False
-    host = (u.hostname or "").lower()
-    return u.scheme == "https" and any(host == h or host.endswith("." + h) for h in PUSH_HOSTS)
+    host = (u.hostname or "").lower().rstrip(".")
+    if u.scheme != "https" or not host or "." not in host or host == "localhost" or host.endswith(_BAD_SUFFIXES):
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False  # адрес-IP вместо имени службы
+    except ValueError:
+        return True
 
 
 class Keys(BaseModel):
@@ -108,7 +112,7 @@ async def test(db: AsyncSession = Depends(get_db), user: User = Depends(require_
     if not subs:
         raise HTTPException(status_code=400, detail="На ваших устройствах уведомления ещё не включены")
     res = await webpush.send_to(db, subs, "Пифагор: проверка",
-                                "Уведомления работают. Сюда будут приходить заявки, новые клиенты, отказы и итоги дня.",
+                                "Уведомления работают. Сюда будут сразу приходить новые заявки, новые ученики, новые клиенты и отказы.",
                                 "/", "test")
     return res
 
@@ -175,96 +179,3 @@ async def _deliver(items):
                                               f"{who} · статус: {st}", "/", f"crm-st-{cid}")
     except Exception:
         logger.exception("CRM push failed")
-
-
-# ─── итоги дня в 21:00 по Минску ─────────────────────────────────────────────
-
-DIGEST_HOUR = 21
-
-
-async def _state_get(db, key: str) -> Optional[str]:
-    row = await db.get(AppState, key)
-    return row.value if row else None
-
-
-async def _state_set(db, key: str, value: str) -> None:
-    row = await db.get(AppState, key)
-    if row is None:
-        db.add(AppState(key=key, value=value, updated_at=datetime.utcnow()))
-    else:
-        row.value, row.updated_at = value, datetime.utcnow()
-
-
-def _money(v: float) -> str:
-    return f"{v:,.0f}".replace(",", " ") + " р"
-
-
-async def daily_digest(db, day) -> Optional[tuple[str, str]]:
-    from app.services.finance_report import compute_finance_rows
-    from app.services.pricing import load_prices
-    rows = (await db.execute(
-        select(Lesson.child_id, Lesson.date).where(Lesson.status == LessonStatus.completed, Lesson.date == day)
-    )).all()
-    prices = await load_prices(db, [r[0] for r in rows])
-    revenue = sum(prices.price(c, d) for c, d in rows)
-    start, end = datetime.combine(day, datetime.min.time()) - timedelta(hours=3), \
-        datetime.combine(day, datetime.min.time()) + timedelta(hours=21)
-    ev = (await db.execute(
-        select(CrmStatusEvent.new_status, func.count()).where(CrmStatusEvent.changed_at >= start,
-                                                              CrmStatusEvent.changed_at < end)
-        .group_by(CrmStatusEvent.new_status)
-    )).all()
-    ev = {k: v for k, v in ev}
-    new_children = await db.scalar(
-        select(func.count(ChildProfile.id)).join(User, User.id == ChildProfile.user_id)
-        .where(User.created_at >= start, User.created_at < end)
-    ) or 0
-    clients = await db.scalar(
-        select(func.count(ChildProfile.id)).join(User, User.id == ChildProfile.user_id)
-        .where(ChildProfile.crm_status == CLIENT, User.is_active.isnot(False))
-    ) or 0
-    debt = sum(max(0.0, float(r.debt or 0)) for r in await compute_finance_rows(db))
-    prev = json.loads(await _state_get(db, "digest_prev") or "{}")
-    d_debt = debt - prev["debt"] if "debt" in prev else None
-    d_cl = clients - prev["clients"] if "clients" in prev else None
-    await _state_set(db, "digest_prev", json.dumps({"debt": round(debt, 2), "clients": clients, "day": day.isoformat()}))
-    sign = lambda x: ("+" if x > 0 else "−" if x < 0 else "±") + (_money(abs(x)) if isinstance(x, float) else str(abs(x)))
-    lines = [f"Проведено занятий: {len(rows)} на {_money(revenue)}"]
-    lines.append(f"Клиентов: {clients}" + (f" ({sign(d_cl)} за день)" if d_cl else ""))
-    moves = []
-    if new_children:
-        moves.append(f"новых в CRM {new_children}")
-    if ev.get(CLIENT):
-        moves.append(f"стали клиентами {ev[CLIENT]}")
-    left = sum(ev.get(s, 0) for s in LEFT)
-    if left:
-        moves.append(f"отказов {left}")
-    if moves:
-        t = ", ".join(moves)
-        lines.append(t[:1].upper() + t[1:])
-    lines.append(f"Клиенты должны: {_money(debt)}" + (f" ({sign(round(d_debt, 2))} за день)" if d_debt and abs(d_debt) >= 1 else ""))
-    return f"Итоги дня {day.strftime('%d.%m')}", "\n".join(lines)
-
-
-async def digest_task():
-    """Раз в 5 минут: после 21:00 по Минску — один раз за день итоги дня."""
-    from app.db.session import AsyncSessionLocal
-    await asyncio.sleep(60)
-    while True:
-        try:
-            now = datetime.utcnow() + timedelta(hours=3)
-            if now.hour >= DIGEST_HOUR:
-                async with AsyncSessionLocal() as db:
-                    has = await db.scalar(select(func.count(PushSubscription.id)))
-                    if has and await _state_get(db, "digest_sent") != now.date().isoformat():
-                        await _state_set(db, "digest_sent", now.date().isoformat())
-                        await db.commit()
-                        msg = await daily_digest(db, now.date())
-                        await db.commit()
-                        if msg:
-                            await webpush.push_admins(msg[0], msg[1], "/", "digest")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("daily digest failed")
-        await asyncio.sleep(300)

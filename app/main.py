@@ -454,8 +454,7 @@ async def lifespan(app: FastAPI):
     from app.api.v1.endpoints.quality import qm_scheduler_task
     task = asyncio.create_task(_daily_email_task())
     qm_task = asyncio.create_task(qm_scheduler_task())
-    from app.api.v1.endpoints.push import digest_task
-    tasks = [task, qm_task, asyncio.create_task(digest_task())]
+    tasks = [task, qm_task]
     if not schema_ok:
         tasks.append(asyncio.create_task(_schema_retry_task()))
     yield
