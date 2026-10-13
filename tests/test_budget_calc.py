@@ -63,8 +63,14 @@ def test_informal_and_chp():
     assert res["rest"] == r2(res["chp"] - 500 - 870)
     be = res["breakeven"]
     # при h = точке безубыточности прибыль ≈ 0
-    m = be["margin_per_hour"]
-    assert abs(m * be["hours_breakeven"] - be["fixed"]) < 1
+    m = be["margin_per_lesson"]
+    assert abs(m * be["lessons_breakeven"] - be["fixed"]) < m * 0.06  # округление до 0,1 занятия
+    # всё «на занятие»: часы в расчёт не входят
+    res2 = compute({"revenue": 10000, "hours": 999, "lessons": 200,
+                    "tutors": [{"id": 1, "name": "A", "net": 3000, "formal": True, "deduction": True}],
+                    "staff": [], "month": {"advertising": 100, "fund": 500, "next_month": 870}})
+    assert res2["breakeven"] == be and res2["chp"] == res["chp"]
+    assert res["chp_per_lesson"] == r2(res["chp"] / 200) and res["rest_per_lesson"] == r2(res["rest"] / 200)
 
 
 def test_net_never_short_and_minimal():
@@ -103,3 +109,41 @@ def test_structure_parts_sum_to_revenue_and_contribution():
     assert a["contribution"] == r2(3000 - 3000 * 0.072 - a["cost"])
     # налог на вывод: неоформленный B + реклама + следующий месяц
     assert T["withdraw_tax"] == r2(res["tutors"][1]["withdraw_tax"] + r2(200 * 13 / 87) + r2(300 * 13 / 87))
+
+
+def _base_data(items):
+    return {"revenue": 10000, "hours": 0, "lessons": 250,
+            "tutors": [{"id": 1, "name": "A", "net": 3000, "formal": True, "deduction": False}],
+            "staff": [], "month": {"advertising": 0, "fund": 500, "next_month": 0, "items": items}}
+
+
+def test_custom_items():
+    k = 13 / 87
+    base = compute(_base_data([]))
+    # фиксированный расход, выводится на карту: ЧП меньше на сумму и налог на вывод
+    r = compute(_base_data([{"id": "rent", "name": "Аренда", "mode": "fixed", "value": 300, "kind": "expense", "withdraw": True}]))
+    assert r["chp"] == r2(base["chp"] - 300 - r2(300 * k))
+    assert r["rest"] == r2(r["chp"] - 500)
+    # фиксированная сумма «из ЧП», остаётся на счёте: ЧП не меняется, остаток меньше
+    r = compute(_base_data([{"id": "f", "name": "Резерв", "mode": "fixed", "value": 200, "kind": "alloc", "withdraw": False}]))
+    assert r["chp"] == base["chp"] and r["rest"] == r2(base["rest"] - 200)
+    # 5% от ЧП на карту: налог сам уменьшает ЧП; сумма = 5% от итогового ЧП
+    r = compute(_base_data([{"id": "bd", "name": "День рождения", "mode": "pct", "value": 5, "kind": "alloc", "withdraw": True}]))
+    it = r["items"][0]
+    assert abs(it["amount"] - 0.05 * r["chp"]) <= 0.02
+    assert it["tax"] == r2(it["amount"] * k)
+    assert r["chp"] == r2(base["chp"] - it["tax"])
+    assert r["rest"] == r2(r["chp"] - 500 - it["amount"])
+    # 5% от ЧП без вывода: ЧП тот же, остаток меньше на 5% ЧП
+    r = compute(_base_data([{"id": "bd", "name": "ДР", "mode": "pct", "value": 5, "kind": "alloc", "withdraw": False}]))
+    assert r["chp"] == base["chp"] and r["rest"] == r2(base["rest"] - r2(0.05 * base["chp"]))
+    # сверка: выручка − выплаты − все налоги и комиссии − расходы = ЧП
+    r = compute(_base_data([{"id": "rent", "name": "Аренда", "mode": "fixed", "value": 300, "kind": "expense", "withdraw": True},
+                            {"id": "bd", "name": "ДР", "mode": "pct", "value": 5, "kind": "alloc", "withdraw": True}]))
+    T = r["totals"]
+    paid = sum(x.get("net_check", x["net"]) for x in r["tutors"])
+    assert abs(10000 - paid - r["accountant"] - r["easypay"] - T["taxes_all"] - r["items_expense"] - r["chp"]) < 0.02
+    # безубыточность: на точке безубыточности ЧП = 0
+    be = r["breakeven"]
+    pts = be["curve"]
+    assert be["lessons_breakeven"] > 0 and any(p["chp"] > 0 for p in pts)

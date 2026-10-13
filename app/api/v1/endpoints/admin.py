@@ -1,3 +1,4 @@
+import logging
 import secrets
 import json
 import uuid
@@ -39,6 +40,7 @@ from app.schemas.schemas import (
     ActOut, TutorPayoutCreate, TutorPayoutOut,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 MAX_INVITE_DESCRIPTION_LENGTH = 120
 
@@ -146,7 +148,10 @@ async def _delete_invite_codes_for_descriptions(db: AsyncSession, descriptions: 
     if not clean:
         return 0
 
-    result = await db.execute(select(InviteCode).where(InviteCode.description.in_(clean)))
+    # только коды, не привязанные ни к какому аккаунту: раньше при удалении ученика
+    # удалялись и коды его тёзок (у них то же описание «Фамилия Имя»)
+    result = await db.execute(select(InviteCode).where(InviteCode.description.in_(clean),
+                                                       InviteCode.used_by_user_id.is_(None)))
     direct_codes = result.scalars().all()
     code_ids = {code.id for code in direct_codes}
     code_ids.update(code.linked_code_id for code in direct_codes if code.linked_code_id)
@@ -239,34 +244,114 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
     raise HTTPException(status_code=400, detail=f"Неверная роль для генерации кода: {payload.role}")
 
 
+def _is_placeholder_email(email: Optional[str]) -> bool:
+    return not email or email.strip().lower().endswith("@pifagor.local")
+
+
+async def _ensure_student_codes(db: AsyncSession) -> int:
+    """У каждого ученика из CRM должна быть пара кодов «ученик + родитель».
+    Если кодов нет (удалились вместе с кодами тёзки, были созданы до привязки
+    кодов к аккаунтам и т.п.) — создаём пару и привязываем к существующим
+    аккаунтам ученика и родителя. Код уже зарегистрированного аккаунта
+    сразу помечается использованным, чтобы по нему нельзя было перезаписать
+    чужой аккаунт."""
+    from app.core.security import ahash_password
+    kids = (await db.execute(
+        select(ChildProfile.id, ChildProfile.user_id, User.first_name, User.last_name, User.email)
+        .join(User, User.id == ChildProfile.user_id)
+    )).all()
+    bound = set((await db.execute(
+        select(InviteCode.used_by_user_id).where(InviteCode.role == RoleEnum.child, InviteCode.used_by_user_id.isnot(None))
+    )).scalars().all())
+    missing = [k for k in kids if k[1] not in bound]
+    if not missing:
+        return 0
+    parents_of: dict[int, int] = {}
+    for cid, puid in (await db.execute(
+        select(ParentChild.child_id, ParentProfile.user_id).join(ParentProfile, ParentProfile.id == ParentChild.parent_id)
+        .where(ParentChild.child_id.in_([k[0] for k in missing])).order_by(ParentChild.id)
+    )).all():
+        parents_of.setdefault(cid, puid)
+    parent_emails = dict((await db.execute(
+        select(User.id, User.email).where(User.id.in_(list(parents_of.values()) or [-1]))
+    )).all())
+    placeholder_pw = None
+    for cid, uid, first, last, email in missing:
+        name = f"{last or ''} {first or ''}".strip() or None
+        child_code = InviteCode(role=RoleEnum.child, code=generate_random_code("CHD"), description=name,
+                                used_by_user_id=uid, is_used=not _is_placeholder_email(email))
+        db.add(child_code)
+        await db.flush()
+        puid = parents_of.get(cid)
+        if puid is None:
+            if placeholder_pw is None:
+                placeholder_pw = await ahash_password(secrets.token_urlsafe(24))
+            pcode = generate_random_code("PRN")
+            pu = User(email=f"placeholder-parent-{pcode.lower()}@pifagor.local", hashed_password=placeholder_pw,
+                      first_name="Родитель", last_name=name or "ученика", middle_name="", phone=None,
+                      role=RoleEnum.parent, is_active=True)
+            db.add(pu)
+            await db.flush()
+            pp = ParentProfile(user_id=pu.id)
+            db.add(pp)
+            await db.flush()
+            db.add(ParentChild(parent_id=pp.id, child_id=cid))
+            db.add(InviteCode(role=RoleEnum.parent, code=pcode, description=name, linked_code_id=child_code.id,
+                              used_by_user_id=pu.id, is_used=False))
+        else:
+            db.add(InviteCode(role=RoleEnum.parent, code=generate_random_code("PRN"), description=name,
+                              linked_code_id=child_code.id, used_by_user_id=puid,
+                              is_used=not _is_placeholder_email(parent_emails.get(puid))))
+    await db.commit()
+    logger.warning("Invite codes restored for %s students", len(missing))
+    return len(missing)
+
+
 @router.get("/invite-codes", response_model=List[InviteCodeResponse], dependencies=[Depends(require_admin)])
 async def list_invite_codes(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(InviteCode).order_by(InviteCode.created_at.desc()))
-    codes = result.scalars().all()
-
-    child_users_result = await db.execute(
+    try:
+        await _ensure_student_codes(db)
+    except Exception:  # восстановление — дополнение; список всё равно показываем
+        logger.exception("restore invite codes failed")
+        await db.rollback()
+    codes = (await db.execute(select(InviteCode).order_by(InviteCode.created_at.desc()))).scalars().all()
+    by_id = {c.id: c for c in codes}
+    users = {uid: (role, first, last) for uid, role, first, last in (await db.execute(
+        select(User.id, User.role, User.first_name, User.last_name)
+        .where(User.id.in_([c.used_by_user_id for c in codes if c.used_by_user_id] or [-1]))
+    )).all()}
+    child_user_rows = (await db.execute(
         select(User.first_name, User.last_name).join(ChildProfile, ChildProfile.user_id == User.id)
-    )
-    child_user_rows = child_users_result.all()
-    active_child_names = {
-        f"{last} {first}".strip()
-        for first, last in child_user_rows
-        if first or last
-    } | {
-        f"{first} {last}".strip()
-        for first, last in child_user_rows
-        if first or last
-    }
+    )).all()
+    active_child_names = {f"{last} {first}".strip() for first, last in child_user_rows if first or last} | \
+        {f"{first} {last}".strip() for first, last in child_user_rows if first or last}
+
+    def child_name(code) -> Optional[str]:
+        u = users.get(code.used_by_user_id) if code.used_by_user_id else None
+        return f"{u[2] or ''} {u[1] or ''}".strip() if u and u[0] == RoleEnum.child else None
 
     visible = []
     for code in codes:
         description = (code.description or "").strip()
         if _is_suspicious_invite_description(description):
             continue
-        if code.role in (RoleEnum.child, RoleEnum.parent) and description:
-            if description not in active_child_names:
+        if code.role in (RoleEnum.child, RoleEnum.parent):
+            if code.used_by_user_id:
+                # код привязан к аккаунту: показываем, пока аккаунт есть; имя — текущее имя ученика
+                # (раньше код пропадал, если ученик при регистрации написал имя иначе или его переименовали в CRM)
+                if code.used_by_user_id not in users:
+                    continue
+                if code.role == RoleEnum.child:
+                    description = child_name(code) or description
+                else:
+                    partner = by_id.get(code.linked_code_id) if code.linked_code_id else None
+                    description = (child_name(partner) if partner else None) or description
+            elif description and description not in active_child_names:
                 continue
-        visible.append(code)
+        visible.append(InviteCodeResponse(
+            id=code.id, code=code.code, role=code.role, description=description or None,
+            is_used=bool(code.is_used), linked_code_id=code.linked_code_id, created_at=code.created_at,
+        ))
     return visible
 
 

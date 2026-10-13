@@ -162,6 +162,11 @@ async def create_lead_request(data: LeadRequestCreate, db: AsyncSession = Depend
     db.add(req)
     await db.commit()
     await db.refresh(req)
+    try:  # веб-уведомление администраторам — в фоне
+        from app.services.webpush import push_admins_later
+        push_admins_later("Новая заявка с сайта", (req.name or "Без имени") + (f" · {req.message[:80]}" if req.message else ""), "/", f"lead-{req.id}")
+    except Exception:
+        pass
 
     subject_name = ""
     if data.subject_id:

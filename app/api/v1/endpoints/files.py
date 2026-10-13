@@ -112,12 +112,8 @@ async def _can_access(db: AsyncSession, user: User, stored: StoredFile) -> bool:
         if user.role == RoleEnum.tutor and user.tutor_profile and user.tutor_profile.id == tutor_id:
             return True
         if user.role == RoleEnum.parent and user.parent_profile:
-            linked = await db.scalar(
-                select(ParentChild.id).where(
-                    ParentChild.parent_id == user.parent_profile.id, ParentChild.child_id == child_id
-                )
-            )
-            if linked:
+            from app.services.family import parent_child_ids
+            if child_id in parent_child_ids(user):
                 return True
     return False
 

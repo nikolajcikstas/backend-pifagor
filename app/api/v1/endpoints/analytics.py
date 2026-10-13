@@ -78,6 +78,9 @@ def _log_status_change(target, value, oldvalue, initiator):
         sess = object_session(target)
         if sess is not None:
             sess.add(CrmStatusEvent(child_id=st.identity[0], old_status=old, new_status=value, changed_at=datetime.utcnow()))
+            # веб-уведомление администраторам (уходит после сохранения)
+            from app.api.v1.endpoints.push import queue_event
+            queue_event(sess, "status", st.identity[0], value)
         if value == CLIENT and not getattr(target, "ref_code", None):
             # реферальный код выдаётся, когда ученик становится клиентом
             from app.services.referrals import new_code

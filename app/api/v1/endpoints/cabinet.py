@@ -10,6 +10,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
+from app.services.family import parent_child_ids
 from app.models.models import (
     Report, Homework, Payment, Test, TestQuestion, TestAnswer,
     TestResult, Notification, Act, ParentContract, TutorContract,
@@ -203,13 +204,9 @@ async def _approve(db: AsyncSession, report: Report) -> bool:
         return True
     report.status = "approved"
     report.approved_at = datetime.utcnow()
-    parents = await db.execute(
-        select(ParentProfile.user_id)
-        .join(ParentChild, ParentChild.parent_id == ParentProfile.id)
-        .where(ParentChild.child_id == report.child_id)
-    )
+    from app.services.family import family_parent_user_ids
     student = _user_name(report.child.user if report.child else None)
-    for parent_user_id in parents.scalars().all():
+    for parent_user_id in await family_parent_user_ids(db, report.child_id):
         await _notify(db, parent_user_id, "Новый отчёт репетитора",
                       f"Репетитор подготовил отчёт по ученику {student}. Его можно посмотреть в разделе «Отчёты».")
     return True
@@ -249,7 +246,7 @@ async def list_reports(
     elif current_user.role == RoleEnum.child and current_user.child_profile:
         q = q.where(Report.child_id == current_user.child_profile.id, Report.status == "approved")
     elif current_user.role == RoleEnum.parent and current_user.parent_profile:
-        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        child_ids = parent_child_ids(current_user)
         if child_id and child_id not in child_ids:
             raise HTTPException(status_code=403, detail="Недостаточно прав")
         if not child_ids:
@@ -530,7 +527,7 @@ async def list_homeworks(
     if current_user.role == RoleEnum.child and current_user.child_profile:
         q = q.where(Homework.child_id == current_user.child_profile.id)
     elif current_user.role == RoleEnum.parent and current_user.parent_profile:
-        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        child_ids = parent_child_ids(current_user)
         if child_id and child_id not in child_ids:
             raise HTTPException(status_code=403, detail="Недостаточно прав")
         q = q.where(Homework.child_id == child_id if child_id else Homework.child_id.in_(child_ids))
@@ -728,44 +725,79 @@ async def get_parent_finance(
     """Реальная сумма оплаченных/неоплаченных занятий и задолженность для
     ЛК родителя — считается той же логикой, что и админский finance-report
     (включая учёт «семейных» платежей на нескольких детей одного плательщика),
-    чтобы цифры совпадали с СРМ."""
+    чтобы цифры совпадали с СРМ. Если детей несколько — итог по семье и
+    разбивка по каждому ребёнку; история оплат — все платежи семьи."""
+    from app.models.models import EmailReceiptSplit, PayerChildLink
+    from app.services.email_parser import _normalize_name
     from app.services.finance_report import compute_finance_rows
 
     if current_user.role != RoleEnum.parent or not current_user.parent_profile:
         raise HTTPException(status_code=403, detail="Only parents can view this")
 
-    child_ids_res = await db.execute(
-        select(ParentChild.child_id).where(ParentChild.parent_id == current_user.parent_profile.id)
-    )
-    child_ids = [row[0] for row in child_ids_res.all()]
+    child_ids = parent_child_ids(current_user)
     if not child_ids:
-        return {"lessons_paid": 0, "lessons_conducted": 0, "debt": 0.0, "receipts": []}
+        return {"lessons_paid": 0, "lessons_conducted": 0, "debt": 0.0, "receipts": [], "children": []}
 
     rows = await compute_finance_rows(db, child_ids=child_ids)
     lessons_paid = sum(r.lessons_paid for r in rows)
     lessons_conducted = sum(r.lessons_conducted for r in rows)
     debt = sum(r.debt for r in rows)  # по ценам на даты занятий (история цен)
 
-    receipts_res = await db.execute(
-        select(EmailReceipt)
-        .where(EmailReceipt.child_id.in_(child_ids))
-        .order_by(EmailReceipt.payment_date.desc(), EmailReceipt.created_at.desc())
-    )
-    receipts = [
-        {
-            "id": r.id,
-            "amount": r.amount,
-            "payment_date": r.payment_date,
-            "created_at": r.created_at,
-        }
-        for r in receipts_res.scalars().all()
-    ]
+    # история оплат семьи: чеки на этих детей, их «разделённые» чеки и чеки
+    # того же плательщика, если он привязан к нескольким детям семьи
+    names = {cid: n for cid, n in (await db.execute(
+        select(ChildProfile.id, User.first_name).join(User, User.id == ChildProfile.user_id)
+        .where(ChildProfile.id.in_(child_ids))
+    )).all()}
+    split_rows = (await db.execute(
+        select(EmailReceiptSplit.receipt_id, EmailReceiptSplit.child_id).where(EmailReceiptSplit.child_id.in_(child_ids))
+    )).all()
+    split_children: dict[int, set] = {}
+    for rid, cid in split_rows:
+        split_children.setdefault(rid, set()).add(cid)
+    payer_children: dict[str, set] = {}
+    for key, cid in (await db.execute(
+        select(PayerChildLink.payer_name_normalized, PayerChildLink.child_id).where(PayerChildLink.child_id.in_(child_ids))
+    )).all():
+        payer_children.setdefault(key, set()).add(cid)
+    family_payers = {k for k, v in payer_children.items() if len(v) > 1}
+    ids: dict[int, set] = {}
+    for rid, cid in (await db.execute(
+        select(EmailReceipt.id, EmailReceipt.child_id).where(EmailReceipt.child_id.in_(child_ids))
+    )).all():
+        ids.setdefault(rid, set()).add(cid)
+    for rid, cs in split_children.items():
+        ids.setdefault(rid, set()).update(cs)
+    if family_payers:
+        for rid, payer in (await db.execute(select(EmailReceipt.id, EmailReceipt.payer_name))).all():
+            key = _normalize_name(payer)
+            if key in family_payers:
+                ids.setdefault(rid, set()).update(payer_children[key])
+    receipts = []
+    if ids:
+        for r in (await db.execute(
+            select(EmailReceipt).where(EmailReceipt.id.in_(list(ids)))
+            .order_by(EmailReceipt.payment_date.desc(), EmailReceipt.created_at.desc())
+        )).scalars().all():
+            who = sorted(ids.get(r.id, set()))
+            receipts.append({
+                "id": r.id,
+                "amount": r.amount,
+                "payment_date": r.payment_date,
+                "created_at": r.created_at,
+                "children": [names.get(c) or "" for c in who],
+            })
 
     return {
         "lessons_paid": lessons_paid,
         "lessons_conducted": lessons_conducted,
         "debt": round(debt, 2),
         "receipts": receipts,
+        "children": [
+            {"child_id": r.child_id, "name": r.student_name, "lessons_paid": r.lessons_paid,
+             "lessons_conducted": r.lessons_conducted, "debt": round(r.debt, 2), "lesson_price": r.lesson_price}
+            for r in rows
+        ],
     }
 
 
@@ -1022,6 +1054,18 @@ async def download_act_blank(_: User = Depends(require_tutor)):
 
 # ─── Contracts ────────────────────────────────────────────────────────────────
 
+def _family_contracts(user: User):
+    """Договоры родителя и всех детей его семьи (в т.ч. общий договор на двоих)."""
+    from sqlalchemy import or_
+    from app.models.models import ParentContractChild
+    fam = parent_child_ids(user) or [-1]
+    return or_(
+        ParentContract.parent_id == user.parent_profile.id,
+        ParentContract.child_id.in_(fam),
+        ParentContract.id.in_(select(ParentContractChild.contract_id).where(ParentContractChild.child_id.in_(fam))),
+    )
+
+
 @router.get("/contracts/parent", response_model=List[ParentContractOut])
 async def list_parent_contracts(
     db: AsyncSession = Depends(get_db),
@@ -1029,7 +1073,7 @@ async def list_parent_contracts(
 ):
     q = select(ParentContract)
     if current_user.role == RoleEnum.parent and current_user.parent_profile:
-        q = q.where(ParentContract.parent_id == current_user.parent_profile.id)
+        q = q.where(_family_contracts(current_user))
     elif current_user.role != RoleEnum.admin:
         # раньше репетитор/ученик получали ВСЕ договоры родителей с личными данными
         raise HTTPException(status_code=403, detail="Недостаточно прав")
@@ -1051,8 +1095,8 @@ async def get_parent_profile(
 
     result = await db.execute(
         select(ParentContract)
-        .where(ParentContract.parent_id == current_user.parent_profile.id)
-        .order_by(ParentContract.created_at.desc())
+        .where(_family_contracts(current_user))
+        .order_by((ParentContract.parent_id == current_user.parent_profile.id).desc(), ParentContract.created_at.desc())
     )
     contract = result.scalars().first()
 

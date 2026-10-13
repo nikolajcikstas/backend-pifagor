@@ -131,6 +131,11 @@ async def ref_lead(code: str, body: RefLeadIn, db: AsyncSession = Depends(get_db
     )
     db.add(lead)
     await db.commit()
+    try:  # веб-уведомление администраторам — в фоне
+        from app.services.webpush import push_admins_later
+        push_admins_later("Новая заявка по рекомендации", f"{name} · рекомендовал {referrer}", "/", f"lead-{lead.id}")
+    except Exception:
+        pass
     try:
         from app.services.email_notification import send_lead_notification
         await asyncio.to_thread(send_lead_notification, name=name, phone=phone,
@@ -280,9 +285,8 @@ async def my_referral(db: AsyncSession = Depends(get_db), user: User = Depends(g
     по ней пришло и скидка (действующая или положенная) с обоснованием."""
     if user.role != RoleEnum.parent or not user.parent_profile:
         return {"items": []}
-    ids = list((await db.execute(
-        select(ParentChild.child_id).where(ParentChild.parent_id == user.parent_profile.id)
-    )).scalars().all())
+    from app.services.family import parent_child_ids
+    ids = parent_child_ids(user)
     if not ids:
         return {"items": []}
     children = (await db.execute(select(ChildProfile).where(ChildProfile.id.in_(ids)))).scalars().all()

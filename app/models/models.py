@@ -896,3 +896,28 @@ class TutorContractInfo(Base):
     comment: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     updated_by: Mapped[Optional[str]] = mapped_column(String(200))
+
+
+class PushSubscription(Base):
+    """Подписка браузера на веб-уведомления (пилот: только администраторы)."""
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(200), nullable=False)
+    auth: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_agent: Mapped[Optional[str]] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_ok_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+
+class AppState(Base):
+    """Небольшие служебные значения: ключи веб-уведомлений, отметки «итоги дня
+    отправлены», вчерашние показатели для сравнения."""
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

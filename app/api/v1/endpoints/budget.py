@@ -29,11 +29,11 @@ import time as _time
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -222,11 +222,46 @@ class StaffMember(BaseModel):
         return flags_at(self.hist, month) or TutorFlags(formal=self.formal, deduction=self.deduction)
 
 
+class CostItem(BaseModel):
+    """Своя статья затрат: фиксированная сумма или % от ЧП; расход (уменьшает
+    ЧП) или распределение из ЧП (как фонд); выводится на карту (подоходный
+    налог на вывод 13/87) или остаётся на счёте."""
+    id: str = Field(..., min_length=1, max_length=24, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(..., min_length=1, max_length=80)
+    mode: Literal["fixed", "pct"] = "fixed"
+    value: float = Field(0, ge=0, le=10_000_000)
+    kind: Literal["expense", "alloc"] = "alloc"
+    withdraw: bool = False
+
+    @field_validator("value")
+    @classmethod
+    def _v(cls, v):
+        return round(float(v), 2)
+
+    @model_validator(mode="after")
+    def _pct_ok(self):
+        if self.mode == "pct":
+            if self.value > 100:
+                raise ValueError("процент от ЧП — не больше 100")
+            self.kind = "alloc"   # процент считается от ЧП, поэтому это всегда распределение ЧП
+        return self
+
+
 class MonthVals(BaseModel):
     advertising: float = Field(0, ge=0, le=10_000_000)
     fund: float = Field(0, ge=0, le=10_000_000)
     next_month: float = Field(0, ge=0, le=10_000_000)
     staff: dict[str, float] = Field(default_factory=dict)
+    items: list[CostItem] = Field(default_factory=list, max_length=30)
+
+    @field_validator("items")
+    @classmethod
+    def _items_ok(cls, v):
+        if sum(i.value for i in v if i.mode == "pct") > 100:
+            raise ValueError("сумма процентов от ЧП — не больше 100")
+        if len({i.id for i in v}) != len(v):
+            raise ValueError("повторяется статья затрат")
+        return v
 
     @field_validator("staff")
     @classmethod
@@ -454,7 +489,8 @@ def _inputs(facts: dict, st: BudgetSettings, month: str) -> dict:
               "net": mv.staff.get(s.id, s.net_default)} for s in st.staff]
     return {"revenue": facts["revenue"], "hours": facts["hours"], "lessons": facts["lessons"],
             "tutors": tutors, "staff": staff, "consts": st.consts.model_dump(),
-            "month": {"advertising": mv.advertising, "fund": mv.fund, "next_month": mv.next_month}}
+            "month": {"advertising": mv.advertising, "fund": mv.fund, "next_month": mv.next_month,
+                      "items": [i.model_dump() for i in mv.items]}}
 
 
 # ─── доступ ───────────────────────────────────────────────────────────────────

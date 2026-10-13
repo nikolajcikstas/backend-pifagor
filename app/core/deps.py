@@ -60,6 +60,17 @@ async def get_current_user(
         await db.refresh(new_profile)
         user.parent_profile = new_profile
 
+    if user.role == RoleEnum.parent and user.parent_profile:
+        # Все дети семьи (несколько детей у одного родителя) — для расписания,
+        # оплат, отчётов и ДЗ в личном кабинете.
+        try:
+            from app.services.family import family_child_ids
+            user.pf_family_ids = await family_child_ids(db, user.parent_profile.id)
+        except Exception:  # семья — дополнение; без неё остаются прямые привязки
+            import logging
+            logging.getLogger(__name__).exception("family lookup failed")
+            user.pf_family_ids = None
+
     return user
 
 

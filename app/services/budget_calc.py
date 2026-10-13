@@ -117,6 +117,12 @@ def payroll(net: float, formal: bool, deduction: bool, c: dict) -> dict:
             "net_check": r2(gross - income_tax - pension), "note": note}
 
 
+def _item_view(i: dict) -> dict:
+    return {"id": i.get("id"), "name": i.get("name") or "Статья", "mode": i.get("mode", "fixed"),
+            "value": float(i.get("value") or 0), "kind": "alloc" if i.get("mode") == "pct" else i.get("kind", "alloc"),
+            "withdraw": bool(i.get("withdraw"))}
+
+
 def compute(data: dict, with_extras: bool = True) -> dict:
     """data: revenue, hours, lessons, tutors[{id,name,net,hours,lessons,formal,deduction}],
     staff[{id,name,net,formal,deduction}], consts, month{advertising,fund,next_month}."""
@@ -155,12 +161,50 @@ def compute(data: dict, with_extras: bool = True) -> dict:
     next_tax = r2(nxt * it / (1 - it))
     # Реклама оплачивается с личной карты — деньги на неё выводятся со счёта.
     adv_tax = r2(adv * it / (1 - it))
-    # ЧП = выручка − все расходы (вместе с подоходным налогом на вывод денег
-    # на рекламу и «на следующий месяц»).
     # Фонд и сам «следующий месяц» — это распределение уже полученного ЧП.
-    chp = r2(R - usn - easypay - acc - adv - adv_tax - tutors_cost - staff_cost - next_tax)
-    rest = r2(chp - fund - nxt)
+    kw = it / (1 - it)
 
+    # Свои статьи затрат. «Расход» уменьшает ЧП; «из ЧП» (фиксированная сумма
+    # или % от ЧП) — распределение, как фонд. Если статья выводится на карту —
+    # подоходный налог на вывод (×13/87) — это расход и входит в ЧП.
+    items_in = [i for i in (m.get("items") or []) if float(i.get("value") or 0) > 0]
+    items_out: list[dict] = []
+    exp_amt = exp_tax = alloc_fixed = alloc_fixed_tax = 0.0
+    for i in items_in:
+        if i.get("mode") == "pct":
+            continue
+        v = r2(float(i["value"]))
+        tax = r2(v * kw) if i.get("withdraw") else 0.0
+        if i.get("kind") == "expense":
+            exp_amt += v
+            exp_tax += tax
+        else:
+            alloc_fixed += v
+            alloc_fixed_tax += tax
+        items_out.append({**_item_view(i), "amount": v, "tax": tax})
+    pct_items = [i for i in items_in if i.get("mode") == "pct"]
+    pw = sum(float(i["value"]) / 100 for i in pct_items if i.get("withdraw"))
+    p_all = sum(float(i["value"]) / 100 for i in pct_items)
+
+    # ЧП = выручка − все расходы (вместе с подоходным налогом на вывод денег
+    # на рекламу, «на следующий месяц» и свои статьи, выводимые на карту).
+    base = r2(R - usn - easypay - acc - adv - adv_tax - tutors_cost - staff_cost - next_tax
+              - exp_amt - exp_tax - alloc_fixed_tax)
+    # Статьи «% от ЧП» с выводом на карту: их налог сам уменьшает ЧП, поэтому
+    # ЧП = база ÷ (1 + 13/87 × доля выводимых процентов).
+    chp_raw = base / (1 + kw * pw) if base > 0 else base
+    pct_tax_total = 0.0
+    pct_amt_total = 0.0
+    for i in pct_items:
+        a = r2(float(i["value"]) / 100 * max(chp_raw, 0.0))
+        tax = r2(a * kw) if i.get("withdraw") else 0.0
+        pct_amt_total += a
+        pct_tax_total += tax
+        items_out.append({**_item_view(i), "amount": a, "tax": tax})
+    chp = r2(base - pct_tax_total)
+    items_tax = r2(exp_tax + alloc_fixed_tax + pct_tax_total)
+    items_alloc = r2(alloc_fixed + pct_amt_total)
+    rest = r2(chp - fund - nxt - items_alloc)
     out: dict[str, Any] = {
         "consts": c,
         "revenue": r2(R), "hours": round(H, 2), "lessons": int(round(L)),
@@ -168,6 +212,7 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         "tutors": tut, "staff": stf,
         "tutors_cost": tutors_cost, "staff_cost": staff_cost,
         "profit": chp, "fund": r2(fund), "next_month": r2(nxt), "next_month_tax": next_tax,
+        "items": items_out, "items_expense": r2(exp_amt), "items_tax": items_tax, "items_alloc": items_alloc,
         "chp": chp, "rest": rest,
         # всё «на занятие»: ставка репетитора и цена клиента — за занятие, часы не учитываются
         "chp_per_lesson": r2(chp / L) if L > 0 else None,
@@ -181,7 +226,7 @@ def compute(data: dict, with_extras: bool = True) -> dict:
             "fszn": r2(tot(tut, "fszn") + tot(stf, "fszn")),
             "fszn_with_pension": r2(tot(tut, "fszn") + tot(stf, "fszn") + tot(tut, "pension") + tot(stf, "pension")),
             "belgosstrakh": r2(tot(tut, "belgosstrakh") + tot(stf, "belgosstrakh")),
-            "withdraw_tax": r2(tot(tut, "withdraw_tax") + tot(stf, "withdraw_tax") + adv_tax + next_tax),
+            "withdraw_tax": r2(tot(tut, "withdraw_tax") + tot(stf, "withdraw_tax") + adv_tax + next_tax + items_tax),
         },
     }
     T = out["totals"]
@@ -195,10 +240,14 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         {"key": "staff", "label": "Сотрудники\n(с налогами)", "value": -staff_cost, "kind": "minus"},
         {"key": "accountant", "label": "Бухгалтер", "value": -acc, "kind": "minus"},
         {"key": "advertising", "label": "Реклама", "value": -r2(adv), "kind": "minus"},
-        {"key": "next_tax", "label": "Подоходный налог\nна вывод", "value": -r2(adv_tax + next_tax), "kind": "minus"},
+        *[{"key": f"item_{x['id']}", "label": x["name"], "value": -x["amount"], "kind": "minus"}
+          for x in items_out if x["kind"] == "expense"],
+        {"key": "next_tax", "label": "Подоходный налог\nна вывод", "value": -r2(adv_tax + next_tax + items_tax), "kind": "minus"},
         {"key": "chp", "label": "ЧП", "value": chp, "kind": "total"},
         {"key": "fund", "label": "В фонд", "value": -r2(fund), "kind": "minus"},
         {"key": "next", "label": "На следующий\nмесяц", "value": -r2(nxt), "kind": "minus"},
+        *[{"key": f"item_{x['id']}", "label": x["name"], "value": -x["amount"], "kind": "minus"}
+          for x in items_out if x["kind"] == "alloc"],
         {"key": "rest", "label": "Свободный\nостаток", "value": rest, "kind": "total"},
     ]
 
@@ -211,8 +260,11 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         rev_l = R / L
         tutor_l = tutors_cost / L
         margin_l = rev_l * (1 - var_share) - tutor_l
-        fixed = acc + adv + adv_tax + staff_cost + next_tax
-        alloc = fund + nxt
+        fixed = acc + adv + adv_tax + staff_cost + next_tax + exp_amt + exp_tax + alloc_fixed_tax
+        alloc = fund + nxt + alloc_fixed
+
+        def chp_at(num: float) -> float:   # ЧП, когда «маржа × занятия − постоянные» = num
+            return num / (1 + kw * pw) if num > 0 else num
         be = {
             "available": True,
             "revenue_per_lesson": r2(rev_l), "variable_per_lesson": r2(rev_l * var_share + tutor_l),
@@ -221,17 +273,26 @@ def compute(data: dict, with_extras: bool = True) -> dict:
         }
         if margin_l > 0:
             n0 = fixed / margin_l
-            n1 = (fixed + alloc) / margin_l
+            # остаток = ЧП × (1 − доля %-статей) − фиксированные распределения = 0
+            if p_all < 1:
+                need = alloc / (1 - p_all)
+                n1 = (fixed + need * (1 + kw * pw)) / margin_l
+            else:
+                n1 = None
             be.update({
                 "lessons_breakeven": round(n0, 1),
-                "lessons_target": round(n1, 1),
+                "lessons_target": round(n1, 1) if n1 is not None else None,
                 "safety_pct": round(100 * (L - n0) / L, 1),
                 "operating_leverage": round(margin_l * L / chp, 2) if abs(chp) > 0.01 else None,
             })
-            top = max(L * 1.6, n1 * 1.25, 10)
+            top = max(L * 1.6, (n1 or n0) * 1.25, 10)
             steps = 24
-            be["curve"] = [{"n": round(top * i / steps, 1), "chp": r2(margin_l * top * i / steps - fixed),
-                            "rest": r2(margin_l * top * i / steps - fixed - alloc)} for i in range(steps + 1)]
+            curve = []
+            for i in range(steps + 1):
+                n = top * i / steps
+                c_ = chp_at(margin_l * n - fixed)
+                curve.append({"n": round(n, 1), "chp": r2(c_), "rest": r2(c_ - alloc - p_all * max(c_, 0.0))})
+            be["curve"] = curve
         else:
             be["note"] = "Каждое занятие приносит меньше, чем стоит: при этих ценах и ставках безубыточности нет."
     out["breakeven"] = be

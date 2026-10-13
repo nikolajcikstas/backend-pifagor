@@ -8,6 +8,7 @@ from sqlalchemy.orm import aliased, joinedload, selectinload
 
 from app.core.deps import get_current_user
 from app.db.session import get_db
+from app.services.family import parent_child_ids
 from app.models.models import (
     ChildProfile,
     Lesson,
@@ -85,7 +86,7 @@ def _can_access_lesson(user: User, lesson: Lesson) -> bool:
     if user.role == RoleEnum.child and user.child_profile:
         return lesson.child_id == user.child_profile.id
     if user.role == RoleEnum.parent and user.parent_profile:
-        return any(pc.child_id == lesson.child_id for pc in user.parent_profile.children)
+        return lesson.child_id in parent_child_ids(user)
     return False
 
 
@@ -177,7 +178,7 @@ def _role_filters(current_user: User, tutor_id: Optional[int], child_id: Optiona
     elif current_user.role == RoleEnum.parent:
         if not current_user.parent_profile:
             return None
-        child_ids = [pc.child_id for pc in current_user.parent_profile.children]
+        child_ids = parent_child_ids(current_user)
         if not child_ids:
             return None
         filters.append(Lesson.child_id.in_(child_ids))

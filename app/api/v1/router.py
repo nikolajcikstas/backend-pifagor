@@ -8,6 +8,7 @@ from app.api.v1.endpoints import referrals
 from app.api.v1.endpoints import lk
 from app.api.v1.endpoints import budget
 from app.api.v1.endpoints import tutor_board
+from app.api.v1.endpoints import push
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -23,3 +24,4 @@ api_router.include_router(referrals.router)
 api_router.include_router(lk.router)
 api_router.include_router(budget.router)
 api_router.include_router(tutor_board.router)
+api_router.include_router(push.router)
