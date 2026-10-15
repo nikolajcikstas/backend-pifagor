@@ -1,0 +1,16 @@
+1) БЭКЕНД — GitHub nikolajcikstas/backend-pifagor
+   Загрузить с заменой, сохраняя папки (перетащить папку app):
+     app/main.py
+     app/api/v1/endpoints/auth.py
+     app/api/v1/endpoints/admin.py
+     app/services/phone_repair.py   (новый файл)
+   Commit → Render обновится сам за 2–5 минут.
+   Через минуту после запуска сервер сам восстановит телефоны родителей
+   из договоров (только там, где вместо номера стоят нули или пусто).
+
+2) САЙТ — hoster.by → ~/www/pifagor1.by/
+   СНАЧАЛА: в папку assets загрузить index-D8Ukf_1X-r65.js
+   ПОТОМ:   в корень загрузить index.html (с заменой)
+   Порядок важен — иначе будет белый экран.
+
+После заливки: Ctrl+F5 на сайте.

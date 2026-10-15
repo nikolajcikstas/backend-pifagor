@@ -455,7 +455,8 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(_daily_email_task())
     qm_task = asyncio.create_task(qm_scheduler_task())
     from app.services.debt_reminders import debt_reminder_task
-    tasks = [task, qm_task, asyncio.create_task(debt_reminder_task())]
+    from app.services.phone_repair import phone_repair_task
+    tasks = [task, qm_task, asyncio.create_task(debt_reminder_task()), asyncio.create_task(phone_repair_task())]
     if not schema_ok:
         tasks.append(asyncio.create_task(_schema_retry_task()))
     yield

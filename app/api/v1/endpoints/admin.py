@@ -244,6 +244,11 @@ async def create_invite_codes(payload: InviteCodeCreate, db: AsyncSession = Depe
     raise HTTPException(status_code=400, detail=f"Неверная роль для генерации кода: {payload.role}")
 
 
+def _real_phone(p: Optional[str]) -> bool:
+    from app.services.phone_repair import real_phone
+    return real_phone(p)
+
+
 def _is_placeholder_email(email: Optional[str]) -> bool:
     return not email or email.strip().lower().endswith("@pifagor.local")
 
@@ -658,11 +663,9 @@ async def update_admin_student(
                     )
 
 
-    parent_user = None
-    for link in student.child_profile.parents:
-        if link.parent and link.parent.user:
-            parent_user = link.parent.user
-            break
+    # правим того родителя, чей телефон показан в CRM (первый с настоящим номером)
+    parent_users = [link.parent.user for link in student.child_profile.parents if link.parent and link.parent.user]
+    parent_user = next((u for u in parent_users if _real_phone(u.phone)), parent_users[0] if parent_users else None)
     if parent_user:
         if payload.parent_name is not None:
             parts = payload.parent_name.strip().split()
@@ -780,7 +783,10 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
         tutors = [t.strip() for t in (child.tutors_text or "").split(",") if t.strip()] or lesson_tutors
         has_contract = child.id in children_with_contract
         parent_names = [f"{p.last_name} {p.first_name}".strip() for p in parents]
-        parent_phones = [p.phone for p in parents if p.phone]
+        # заглушку +375000000000 (её подставляла регистрация) не показываем
+        parent_phones = [p.phone for p in parents if _real_phone(p.phone)]
+        # тот же родитель, которого правит сохранение карточки (первый с настоящим номером)
+        main_parent = next((p for p in parents if _real_phone(p.phone)), parents[0] if parents else None)
         rows.append({
             "child_id": child.id,
             "user_id": user.id,
@@ -800,7 +806,7 @@ async def students_dashboard(db: AsyncSession = Depends(get_db)):
             "student_phone": user.phone,
             "parent_names": parent_names,
             "parent_phones": parent_phones,
-            "parent_name": parent_names[0] if parent_names else "",
+            "parent_name": (f"{main_parent.last_name} {main_parent.first_name}".strip() if main_parent else ""),
             "parent_phone": parent_phones[0] if parent_phones else "",
             "channel": child.channel or "",
             "accounting_start_date": (

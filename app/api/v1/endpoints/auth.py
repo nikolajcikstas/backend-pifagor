@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,6 +129,12 @@ async def _link_parent_child_for_invite(db: AsyncSession, invite: InviteCode, us
         db.add(ParentChild(parent_id=parent_profile.id, child_id=child_profile.id))
 
 
+def real_phone(p: Optional[str]) -> bool:
+    """Настоящий номер, а не пусто и не заглушка +375000000000."""
+    digits = "".join(ch for ch in (p or "") if ch.isdigit())
+    return len(digits) >= 9 and not set(digits.removeprefix("375")) <= {"0"}
+
+
 @router.post("/register", response_model=UserOut)
 async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     invite = await db.scalar(select(InviteCode).where(InviteCode.code == data.invite_code))
@@ -151,7 +159,11 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
         target_user.first_name = data.first_name
         target_user.last_name = data.last_name
         target_user.middle_name = data.middle_name or ""
-        target_user.phone = data.phone or target_user.phone
+        # Телефон, введённый администратором в CRM, не трогаем: форма регистрации
+        # телефон не спрашивает и присылала заглушку +375000000000, которая
+        # затирала настоящий номер родителя.
+        if not real_phone(target_user.phone) and real_phone(data.phone):
+            target_user.phone = data.phone
         target_user.role = data.role
         target_user.is_active = True
         new_user = target_user
@@ -162,7 +174,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
             first_name=data.first_name,
             last_name=data.last_name,
             middle_name=data.middle_name or "",
-            phone=data.phone or "+375000000000",
+            phone=data.phone if real_phone(data.phone) else None,
             role=data.role,
             is_active=True,
         )
