@@ -191,6 +191,7 @@ class LessonCreate(BaseModel):
     time_start: TimeType
     time_end: TimeType
     is_free_trial: bool = False
+    paid_bank: bool = False
     notes: Optional[str] = None
     # Статус можно указать сразу при добавлении (например, «Проведено»)
     status: Optional[LessonStatus] = None
@@ -207,6 +208,7 @@ class LessonUpdate(BaseModel):
     cancel_reason: Optional[str] = None
     notes: Optional[str] = None
     is_free_trial: Optional[bool] = None
+    paid_bank: Optional[bool] = None
 
 
 class LessonOut(BaseModel):

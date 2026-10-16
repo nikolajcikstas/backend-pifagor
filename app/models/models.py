@@ -203,6 +203,9 @@ class Lesson(Base):
     cancel_reason: Mapped[Optional[str]] = mapped_column(Text)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     is_free_trial: Mapped[bool] = mapped_column(Boolean, default=False)
+    # занятие оплачено переводом на расчётный счёт (чека EasyPay нет) — в долге
+    # родителя считается оплаченным; на зарплату репетитора не влияет
+    paid_bank: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     tutor: Mapped["TutorProfile"] = relationship(back_populates="lessons")

@@ -60,27 +60,40 @@ async def compute_finance_rows(
             )
         )
         payer_keys = {row[0] for row in family_links_res.all()}
-        if payer_keys:
+        # семья может платить с разных имён (мама, папа, старший ребёнок) —
+        # собираем всех детей и всех плательщиков семьи, пока набор растёт
+        for _ in range(3):
+            if not payer_keys:
+                break
             expand_res = await db.execute(
                 select(PayerChildLink.child_id).where(
                     PayerChildLink.payer_name_normalized.in_(payer_keys)
                 )
             )
-            scoped_child_ids |= {row[0] for row in expand_res.all()}
+            grown = scoped_child_ids | {row[0] for row in expand_res.all()}
+            more_keys = {row[0] for row in (await db.execute(
+                select(PayerChildLink.payer_name_normalized).where(PayerChildLink.child_id.in_(grown))
+            )).all()}
+            if grown == scoped_child_ids and more_keys == payer_keys:
+                break
+            scoped_child_ids, payer_keys = grown, more_keys
         lesson_filters.append(Lesson.child_id.in_(scoped_child_ids))
         receipt_filters.append(EmailReceipt.child_id.in_(scoped_child_ids))
 
     lessons_res = await db.execute(
-        select(Lesson.child_id, Lesson.date).where(*lesson_filters)
+        select(Lesson.child_id, Lesson.date, Lesson.paid_bank).where(*lesson_filters)
     )
     lessons_by_child: dict[int, int] = {}
     lesson_dates_by_child: dict[int, list] = {}
-    for cid, ldate in lessons_res.all():
+    bank_dates_by_child: dict[int, list] = {}   # оплачено на расчётный счёт (чека нет)
+    for cid, ldate, paid_bank in lessons_res.all():
         lessons_by_child[cid] = lessons_by_child.get(cid, 0) + 1
         lesson_dates_by_child.setdefault(cid, []).append(ldate)
+        if paid_bank:
+            bank_dates_by_child.setdefault(cid, []).append(ldate)
 
     receipts_res = await db.execute(
-        select(EmailReceipt.child_id, func.sum(EmailReceipt.amount).label("total"))
+        select(EmailReceipt.child_id, EmailReceipt.payer_name, EmailReceipt.amount)
         .join(ChildProfile, EmailReceipt.child_id == ChildProfile.id)
         .where(
             *receipt_filters,
@@ -89,9 +102,20 @@ async def compute_finance_rows(
                 func.coalesce(EmailReceipt.payment_date, EmailReceipt.created_at) >= ChildProfile.accounting_start_date,
             ),
         )
-        .group_by(EmailReceipt.child_id)
     )
-    amounts_by_child = {row.child_id: row.total for row in receipts_res}
+    amounts_by_child: dict[int, float] = {}
+    direct_by_child: dict[int, list] = {}   # (плательщик, сумма) — для семейного пересчёта ниже
+    for cid, payer, amount in receipts_res.all():
+        amounts_by_child[cid] = amounts_by_child.get(cid, 0.0) + (amount or 0.0)
+        direct_by_child.setdefault(cid, []).append((payer, amount or 0.0))
+
+    # занятия «оплачено на р/с» засчитываются как оплаченные по цене на их дату
+    bank_paid: dict[int, float] = {}
+    if bank_dates_by_child:
+        bbook = await load_prices(db, set(bank_dates_by_child))
+        for cid, dates in bank_dates_by_child.items():
+            bank_paid[cid] = sum(bbook.price(cid, d) for d in dates)
+            amounts_by_child[cid] = amounts_by_child.get(cid, 0.0) + bank_paid[cid]
 
     links_query = select(PayerChildLink)
     if scoped_child_ids is not None:
@@ -105,28 +129,59 @@ async def compute_finance_rows(
     if groups:
         from app.services.email_parser import _normalize_name
 
+        # Плательщики с общими детьми — одна семья. Раньше каждая группа
+        # считалась отдельно и перезаписывала результат предыдущей: если
+        # семья платила с двух имён (например, мама и старшая дочь), деньги
+        # одного из плательщиков терялись. Теперь все платежи семьи — в одном
+        # «котле» и распределяются по занятиям всех её детей по датам.
+        clusters: list[tuple[set, set]] = [({key}, set(ids)) for key, ids in groups.items()]  # (плательщики, дети)
+        merged = True
+        while merged:
+            merged = False
+            for i in range(len(clusters)):
+                for j in range(i + 1, len(clusters)):
+                    if clusters[i][1] & clusters[j][1]:
+                        clusters[i] = (clusters[i][0] | clusters[j][0], clusters[i][1] | clusters[j][1])
+                        del clusters[j]
+                        merged = True
+                        break
+                if merged:
+                    break
+
         all_receipts_query = select(EmailReceipt)
         if pooled_receipt_filters:
             all_receipts_query = all_receipts_query.where(*pooled_receipt_filters)
         all_receipts_res = await db.execute(all_receipts_query)
-        pooled_paid: dict[str, float] = {}
+        key_cluster = {k: i for i, (ck, _cc) in enumerate(clusters) for k in ck}
+        pooled_paid: dict[int, float] = {}
         for r in all_receipts_res.scalars().all():
-            norm = _normalize_name(r.payer_name)
-            if norm in groups:
-                pooled_paid[norm] = pooled_paid.get(norm, 0.0) + r.amount
+            ci = key_cluster.get(_normalize_name(r.payer_name))
+            if ci is not None:
+                pooled_paid[ci] = pooled_paid.get(ci, 0.0) + r.amount
+        # чеки, привязанные напрямую к детям семьи от «посторонних» плательщиков
+        # (не из семейных групп) — тоже деньги семьи, иначе они бы пропали
+        for ci, (ck, cc) in enumerate(clusters):
+            for cid in cc:
+                for payer, amount in direct_by_child.get(cid, []):
+                    if _normalize_name(payer) not in ck:
+                        pooled_paid[ci] = pooled_paid.get(ci, 0.0) + amount
 
-        group_child_ids = {cid for ids in groups.values() for cid in ids}
+        group_child_ids = {cid for _ck, cc in clusters for cid in cc}
         gbook = await load_prices(db, group_child_ids)
 
-        for group_key, child_ids_in_group in groups.items():
+        for ci, (_keys, child_ids_in_group) in enumerate(clusters):
             combined = []
             for cid in child_ids_in_group:
+                bank_left = list(bank_dates_by_child.get(cid, []))
                 for ldate in lesson_dates_by_child.get(cid, []):
+                    if ldate in bank_left:   # уже оплачено на р/с — деньги семьи на него не тратим
+                        bank_left.remove(ldate)
+                        continue
                     combined.append((ldate, cid))
             combined.sort(key=lambda pair: pair[0])
 
-            remaining = pooled_paid.get(group_key, 0.0)
-            paid_for_child: dict[int, float] = {cid: 0.0 for cid in child_ids_in_group}
+            remaining = pooled_paid.get(ci, 0.0)
+            paid_for_child: dict[int, float] = {cid: bank_paid.get(cid, 0.0) for cid in child_ids_in_group}
             for _ldate, cid in combined:
                 price = gbook.price(cid, _ldate)
                 if remaining + 1e-9 >= price:

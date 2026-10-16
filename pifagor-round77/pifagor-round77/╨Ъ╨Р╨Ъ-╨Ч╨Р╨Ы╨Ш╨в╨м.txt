@@ -1,0 +1,16 @@
+(Заменяет архив round76 — его отдельно заливать не нужно.)
+
+1) БЭКЕНД — GitHub nikolajcikstas/backend-pifagor
+   Загрузить с заменой, сохраняя папки (перетащить папку app):
+     app/main.py
+     app/models/models.py
+     app/schemas/schemas.py
+     app/api/v1/endpoints/lessons.py
+     app/services/finance_report.py
+   Commit → Render обновится сам за 2–5 минут.
+
+2) САЙТ — hoster.by → ~/www/pifagor1.by/
+   СНАЧАЛА: в папку assets загрузить index-D8Ukf_1X-r66.js
+   ПОТОМ:   в корень загрузить index.html (с заменой)
+
+После заливки: Ctrl+F5.

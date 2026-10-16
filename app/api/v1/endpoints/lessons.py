@@ -50,6 +50,7 @@ def _lesson_to_dict(l: Lesson) -> dict:
         "cancel_reason": l.cancel_reason,
         "notes": l.notes,
         "is_free_trial": l.is_free_trial,
+        "paid_bank": bool(l.paid_bank),
         "created_at": str(l.created_at),
     }
 
@@ -276,7 +277,7 @@ async def get_lessons_version(
     row_text = func.concat_ws(
         "|", Lesson.id, Lesson.status, Lesson.date, Lesson.time_start, Lesson.time_end,
         Lesson.subject_id, Lesson.tutor_id, Lesson.child_id, func.coalesce(Lesson.notes, ""),
-        Lesson.is_free_trial, func.coalesce(Lesson.cancel_reason, ""),
+        Lesson.is_free_trial, func.coalesce(Lesson.cancel_reason, ""), Lesson.paid_bank,
     )
     stmt = select(
         func.count(Lesson.id),
@@ -317,6 +318,8 @@ async def create_lesson(
 
     payload = data.model_dump()
     requested_status = payload.pop("status", None)
+    if current_user.role != RoleEnum.admin:
+        payload["paid_bank"] = False  # отметку об оплате на р/с ставит только администратор
     lesson = Lesson(**payload)
     if requested_status:
         lesson.status = requested_status
@@ -459,6 +462,7 @@ async def update_lesson(
 
     updates = data.model_dump(exclude_none=True)
     if current_user.role != RoleEnum.admin:
+        updates.pop("paid_bank", None)  # отметку об оплате на р/с ставит только администратор
         for protected_field in ("tutor_id", "child_id"):
             if protected_field in updates:
                 raise HTTPException(status_code=403, detail="Only admin can change lesson participants")
